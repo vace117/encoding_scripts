@@ -1,0 +1,127 @@
+#!/bin/ksh
+#
+
+# Sets the bitrate to be used in kbits/second if <16000 or  in  bits/second  if
+# >16000.  If <value> is negative, XviD will use its absolute value as the tar-
+# get size (in kbytes) of the video and compute the associated bitrate automag-
+# ically
+VBITRATE=800
+
+#ABITRATE=96
+
+# Comment these out if you don't want to mess with scaling.
+# This is the desired movie size. You can obtain it by playing
+# the original with mplayer and getting the final resolution
+# from that
+#
+#X=854
+#Y=352
+
+# Play the original with mplayer -vf cropdetect
+#CROP="720:352:0:62"
+
+# Usually 16:9 or 4:3. This setting will only effect the
+# playback in mplayer, since other players don't use the 
+# aspect setting in the AVI container
+# 
+#ASPECT="16:9"
+
+# Start position and for how long to encode from the start position.
+#SS=4910
+#ENDPOS=240
+
+############################# Functions ###############
+init_filters() {
+  if [[ -z $FILTERS ]] ; then
+    FILTERS="-vf "
+  else
+    FILTERS="$FILTERS,"
+  fi
+}
+
+
+
+if [[ $# -lt 1 ]] ; then
+  echo
+  echo "  Usage: encodefile.xvid <file or DVD track> [[param1] [param2] ...etc]"
+  echo
+  exit 1
+fi
+
+
+IN_FILE=$1
+shift 1
+
+# Consume extra parameters
+while [ $# -ne 0 ] ; do
+  EXTRA_PARAMS="$EXTRA_PARAMS $1"
+  shift 1
+done
+
+# Figure out what to name the output file
+echo $IN_FILE | grep "dvd:\/\/" > /dev/null
+if [[ $? -eq 0 ]] ; then
+  OUT_FILE=dvd.avi.done
+else
+  OUT_FILE=${IN_FILE%\.*}.done
+fi
+
+COMMON="-ovc xvid -xvidencopts bitrate=$VBITRATE:quant_type=h263:vhq=4:max_bframes=2:bquant_ratio=150:bquant_offset=75:bf_threshold=0:chroma_me:hq_ac"
+
+if [[ -n $CROP ]] ; then
+  init_filters
+  FILTERS="${FILTERS}crop=${CROP}"
+fi
+
+
+if [[ -n $X && -n $Y ]] ; then
+  # ASPECT makes a difference for mplayer only. Other player dont read aspect
+  # info from the container
+#  ASPECT=$(echo "scale=4; $X/$Y" | bc)
+  echo "Do you really want to resize your movie to ${X}x${Y} ($ASPECT)? [y/n]"
+  read answer
+  if [[ $answer == "y" ]] ; then 
+	init_filters
+	FILTERS="${FILTERS}scale=$X:$Y"
+	COMMON="-aspect $ASPECT -zoom -sws 9 $COMMON"
+  else
+	exit 1
+  fi
+fi
+
+if [[ -n $SS && -n $ENDPOS ]] ; then
+  echo "Do you really want to encode from ${SS} for ${ENDPOS}? [y/n]"
+  read answer
+  if [[ $answer == "y" ]] ; then
+        COMMON="-ss ${SS} -endpos ${ENDPOS} $COMMON"
+  else
+	exit 1
+  fi
+fi
+
+echo "Do you want to re-encode the audio to $ABITRATE MP3? [y/n]"
+read answer
+if [[ $answer == "y" ]] ; then 
+  AUDIO_ENCODE="-oac mp3lame -lameopts br=96:cbr"
+else
+  AUDIO_ENCODE="-oac copy"
+fi
+
+echo
+echo
+echo
+echo "Does this look ok? (Don't worry about syntax here) [y/n]"
+echo mencoder $IN_FILE $EXTRA_PARAMS $FILTERS $AUDIO_ENCODE $COMMON:pass=\<1/2\> -o $OUT_FILE
+read answer
+if [[ $answer != "y" ]] ; then
+  exit 1
+fi
+
+
+echo "Starting 1st pass on $1..."
+PASS1="$IN_FILE $EXTRA_PARAMS $FILTERS -nosound $COMMON:pass=1 -passlogfile $OUT_FILE.stat -o $OUT_FILE"
+mencoder $PASS1
+
+echo "Starting 2nd pass on $1..."
+PASS2="$IN_FILE $EXTRA_PARAMS $FILTERS $AUDIO_ENCODE $COMMON:pass=2 -passlogfile $OUT_FILE.stat -o $OUT_FILE"
+mencoder $PASS2

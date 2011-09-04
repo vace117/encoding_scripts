@@ -1,0 +1,10 @@
+#/bin/bash
+# Converts all images in the current directory to a different format. You must set to and from formats in the code below
+#
+
+FROM=pgm
+TO=tif
+
+IFS=$'\n'
+for i in `find . -name "*${FROM}"` ; do base=${i%\.*}; convert $i ${base}.${TO} ; done
+

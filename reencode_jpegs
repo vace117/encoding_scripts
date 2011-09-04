@@ -1,0 +1,85 @@
+#!/bin/bash
+# Re-encodes all jpegs found under the current directory to be smaller
+# The following steps are performed:
+#  1) Unpack all jpegs into PPMs and rename original jpegs
+#  2) Compress the PPMs into smaller jpegs
+#  3) Copy EXIF data from the backed up originals to the new jpegs
+#  4) Delete the backed up originals
+#
+# If this utility is called with parameter 'cleanup', it will only
+# attempt to cleanup the temporary files of a previous run
+#
+
+cleanup() {
+ cd $CWD
+ for i in `find . -iname "*original"` ; do
+   cd "$CWD/${i%/*}"
+   NAME_WO_PATH=${i##*/}
+   echo "Removing `pwd`/$NAME_WO_PATH..."
+   rm "$NAME_WO_PATH"
+ done
+
+ cd $CWD
+ for i in `find . -iname "*PPM"` ; do
+   cd "$CWD/${i%/*}"
+   NAME_WO_PATH=${i##*/}
+   echo "Removing `pwd`/$NAME_WO_PATH..."
+   rm "$NAME_WO_PATH"
+ done
+}
+
+CWD=`pwd`
+
+if [[ $1 == "cleanup" ]] ; then
+  cleanup
+  exit 0
+fi
+
+echo "Re-encode all JPEGs under \"$CWD\"?"
+read answer
+if [[ $answer != "y" ]] ; then
+  exit 1
+fi
+
+IFS=$'\n'
+
+# Unpack all jpegs into PPMs and rename original jpegs
+#
+for i in `find . -iname "*jpg"` ; do
+  cd "$CWD/${i%/*}"
+  NAME_WO_PATH=${i##*/}
+  echo "Unpacking `pwd`/$NAME_WO_PATH..."
+  djpeg "$NAME_WO_PATH" > "${NAME_WO_PATH%\.*}.PPM"
+  mv "$NAME_WO_PATH" "$NAME_WO_PATH.original"
+done
+ 
+# Compress the PPMs into smaller jpegs
+#
+cd $CWD
+for i in `find . -iname "*PPM"` ; do
+  cd "$CWD/${i%/*}"
+  NAME_WO_PATH=${i##*/}
+  echo "Recompressing `pwd`/$NAME_WO_PATH..."
+  cjpeg -optimize "$NAME_WO_PATH" > "${NAME_WO_PATH%\.*}.jpg"
+done
+
+# Copy EXIF data from the backed up originals to the new jpegs
+#      
+cd $CWD
+for i in `find . -iname "*original"` ; do
+  cd "$CWD/${i%/*}"
+  FULL_PATH=`pwd`/${i##*/}
+  echo "Copying EXIF data from $FULL_PATH..."
+  exiftool -TagsFromFile "$FULL_PATH" "${FULL_PATH%%\.*}.jpg"
+done
+
+# Delete the backed up originals and PPMs
+# 
+echo "Re-encoding completed. Would you like to delete the originals and PPMs?"
+read answer
+if [[ $answer != "y" ]] ; then
+  exit 0
+fi
+
+cleanup
+

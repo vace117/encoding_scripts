@@ -1,0 +1,1554 @@
+#!/bin/sh
+
+# Any2Vob-0.30
+# A script to automate the creation of PAL/NTSC DVD compliant VOBs from any PC or streaming multimedia file(s), ready for dvdauthoring
+# Supports URL streams & filetypes with multiple video, audio & subtitle tracks
+# Optionally compresses the encoded file by reducing the resolution & video bitrate (--compress=yes)
+# Optionally creates a 5.1 'surround' sound audio track if one does not already exist in the original input file (enabled by default)
+# Author: Rick Harris  rickfharris@yahoo.com.au
+#
+# Tools required:
+#	Latest FFMpeg								-> http://ffmpeg.sourceforge.net/
+#	Latest Transcode							-> http://www.transcoding.org/
+#       Latest Mplayer (with win32codecs, Quicktime & Real Video support)	-> http://www.mplayerhq.hu/
+#	Mjpegtools								-> http://mjpeg.sourceforge.net/
+#	Multimux >=0.2.3							-> http://panteltje.com/panteltje/dvd/
+#       A52dec =0.7.4                                                           -> http://liba52.sourceforge.net/
+#        (compiled with patch from here) -> http://mightylegends.zapto.org/dvd/ebuilds/media-libs/a52dec/files/multi_wav-0.7.4.diff
+#	Ecasound								-> http://eca.cx/
+#	Libsndfile >=1.0.11							-> http://www.mega-nerd.com/libsndfile/
+#	Mpgtx									-> http://mpgtx.sourceforge.net/
+#	DVDauthor >=0.6.11							-> http://sourceforge.net/projects/dvdauthor/
+#
+# Tools optional:
+#	* DTS audio conversion support
+#		LibDTS						-> http://www.videolan.org/dtsdec.html
+#	* PCM audio encoding support
+#		wav2lpcm					-> http://dvd-audio.sourceforge.net/wav2lpcm.tar.gz
+#	* URL network stream encoding support
+#		Wget						-> http://wget.sunsite.dk/
+#	* Matroska support (multiple subtitles/audio tracks)
+#               Mkvtoolnix					-> http://www.bunkus.org/videotools/mkvtoolnix/
+#	* OGM support (multiple subtitles/audio tracks)
+#		OGMtools					-> http://www.bunkus.org/videotools/ogmtools/
+#	* DV-Avi support (PAL<->NTSC,NTSC<->PAL conversions)
+#		Libsoundtouch					-> http://sky.prohosting.com/oparviai/soundtouch/
+#	* MythTV Nuppelvideo support
+#		MythTV >=0.18)					-> http://www.mythtv.org/
+#	* Full MPEG-TS / HDTV / DVB support
+#		Replex						-> http://www.metzlerbros.org/dvb/
+#
+# Supported file formats:		.AVI, .MPEG, .WMV, .MOV, .ASF, .NUV, .MKV, .OGM, .BIN (S)VCD, .SWF, .NSV, .RM,
+#					.RAM, .ASX, .TS, .DV, .3GP, .VP6(Video only), .VP3(Theora), .MP4, .VOB
+# Supported network protocols:		mms://  http://  rtsp://
+#
+# Supported subtitle file formats:	.sub, .srt, .ssa, .smi, .rt, .txt, .aqt, .jss, .js, .ass
+#
+# Usage:	./any2vob -h
+# Example 1:	./any2vob --aspect=16:9 --format=ntsc --compress=yes -i movie1.avi  movie2.mov  movie3.wmv  movie4.nuv \
+#			movie5.bin  movie6.asf  movie7.mpg  movie8.swf  movie9.mkv  movie10.ogm
+#
+# Example 2:	./any2vob --aspect=4:3 --surround=no -i /path/to/directory/containing/files/*
+#
+# NOTES:* To add more subtitle fonts, copy them into either ~/.spumux/ or your xorg/xfree's 'TTF/' fonts directory (must be .ttf fonts)
+#	  A page listing for more free truetype fonts is available here ->
+#	  http://www.microsoft.com/typography/links/links.aspx?type=free&part=1
+#	  A full listing of supported language charactersets & their relative codes, is available here ->
+#	  http://www.gnu.org/software/libiconv/
+#
+###########################################################################################################################
+
+VAR_DATAFILE="/tmp/srcvar.dat"
+
+WORKDIR="tmp_any2vob"
+FORMAT="pal"
+PREVIEW="no"
+AUD_FORMAT="AC3"
+AUD_FMT="ac3"
+FPS="25.000"
+MFPS="25:1"
+TV_WIDTH="720"
+TV_HEIGHT="576"
+WIDTH="720"
+HEIGHT="576"
+MENCODER="no"
+SURROUND="yes"
+HAS_SURROUND="no"
+COMPRESS="no"
+ASPECT="3"
+ASPECT_E="16/9"
+ASPECT_T="16:9"
+HAS_DTS="no"
+KEEP_DTS="yes"
+SKIP_COMM="no"
+MPEGTS_PIDS="no"
+LOG="no"
+LOGFILE="any2vob.log"
+SUBFONT="Vera.ttf"
+SUBFONTSIZE="18.0"
+SUBCHARACTERSET="ISO8859-1"
+
+trap "echo Interrupted; killall -9 ecasound ffmpeg lav2yuv mencoder mplayer mythtranscode tee &> /dev/null; reset; exit 2" 2
+
+warn() {
+        echo ""
+        echo -e "\e[33;01m $1\e[m\c"    # Amber
+        shift; echo " $*"
+        echo ""
+        return 0
+}
+good() {
+        echo ""
+        echo -e "\e[32;01m $1\e[m\c"    # Green
+        shift; echo " $*"
+        echo ""
+        return 0
+}
+errmsg () {
+        echo ""
+        echo -e "\e[31;01m $1\e[m\c"    # Red
+        shift; echo " $*"
+        echo ""
+}
+
+help_text () {
+cat <<EOF
+Any2Vob-0.30
+Usage: $0 [options] -i [input_file(s)]
+
+General options:
+--format=[pal|ntsc]			Format to encode to				(Default: PAL)
+--preview=[yes|no]			Preview video while encoding (slower)		(Default: No)
+--audio_format=[ac3|mp2|pcm16|pcm24]	Audio format to encode to			(Default: AC3)
+--surround=[yes|no]			Encode audio track to 5.1 surround sound	(Default: Yes)
+--compress=[yes|no]			Halve the encoding time & encoded filesize	(Default: No)
+--aspect=[4:3|16:9]			Aspect ratio to encode to			(Default: 16:9)
+--keep_dts=[yes|no]			Preserve DTS audio track if detected		(Default: Yes)
+--log=[yes|no]				Turn logging on (any2vob.log)			(Default: No)
+
+Subtitle options:
+-s [subtitle file(s)]			Encode external subtitle file(s)
+--subfont=[fontname.ttf]		Font to use in subtitles			(Default: Vera.ttf)
+--subfontsize=[fontsize]		Set fontsize in subtitles			(Default: 18.0)
+--subcharacterset=[ISO-codepage]	Set subtitle language codepage for your country	(Default: ISO8859-1)
+
+Miscellaneous options:
+--workdir=[/path/to/dir]                Directory to use for temp files & final VOBS	(Default: ./tmp_any2vob/)
+--calc					Estimate total DVD disk space that will be used	(any2vob --calc -i file1.avi file2.avi)
+--skip_comm=[yes|no]			Skip commercials for MythTV recorded video	(Default: No)
+--mpegts_allpids=[yes|no]               Encode all PIDs from MPEG-TS capture files      (Default: No (First PID only))
+
+NOTE:	* When specifying external subtitle file(s) with the '-s' option in batch input_file conversion mode,
+		the subtitles will be applied to the first input_file only
+	* Encoding to DTS audio is not supported, however if a DTS audio track is found it will be preserved,
+		unless otherwise specified with '--keep_dts=no', in which case it will be converted to either
+		AC3 or the format specified with '--audio_format=...'
+	* MP2 & PCM audio format encodings are strictly stereo only
+EOF
+	exit 0
+}
+
+if [ -z "$1" ]; then
+	help_text
+else
+	until [ -z "$1" ] ; do
+	case "$1" in
+		--format=ntsc) shift; FORMAT="ntsc"; FPS="29.970"; TV_HEIGHT="480"; HEIGHT="480"; MFPS="30000:1001";;
+		--audio_format=mp2) shift; AUD_FORMAT="MP2"; AUD_FMT="mp2" ;;
+		--audio_format=pcm16) shift; AUD_FORMAT="PCM 16-bit"; AUD_FMT="pcm16"; PCM_ARGS="-L 48000:2:16" ;;
+		--audio_format=pcm24) shift; AUD_FORMAT="PCM 24-bit"; AUD_FMT="pcm24"; PCM_ARGS="-L 48000:2:24" ;;
+		--surround=no) shift; SURROUND="no" ;;
+		--compress=yes) shift; COMPRESS="yes";;
+		--aspect=4:3) shift; ASPECT="2" ; ASPECT_E="4/3"; ASPECT_T="4:3" ;;
+		--keep_dts=no) shift; KEEP_DTS="no" ;;
+		--preview=yes) shift; PREVIEW="yes" ;;
+		--log=yes) shift; LOG="yes" ;;
+		--subfont=*) SUBFONT=`echo $1 | sed 's/=/ /' | awk '{print $2}'`; shift ;;
+		--subfontsize=*) SUBFONTSIZE=`echo $1 | sed 's/=/ /' | awk '{print $2}'`; shift ;;
+		--subcharacterset=*) SUBCHARACTERSET=`echo $1 | sed 's/=/ /' | awk '{print $2}'`; shift ;;
+		--skip_comm=yes) shift; SKIP_COMM="yes" ;;
+		--mpegts_allpids=yes) shift; MPEGTS_PIDS="yes" ;;
+		--calc) shift; CALC="yes" ;;
+		--workdir=*) WORKDIR=`echo "$1" | sed 's/--workdir=/ /' | sed 's/^[ \t]*//'`
+				if [ ! -d "$WORKDIR" ]; then
+				errmsg Error: Directory "$WORKDIR" does not exist!
+				exit
+				fi ;
+				shift ;;
+		-s) shift;	EXTSUB="1"
+				SUBS="$@"
+				SUBS=`echo $SUBS | sed 's/\(\([^ -i ]* -i \)\).*/\1/' | sed 's/.\{3\}$//'`
+				while [ "$1" != "-i" ]; do
+			                if [ ! -z "$1" ]; then
+				                let k=$k+1
+				                eval "subs_file_$k=\"$1\""
+				                subs_file_list="$subs_file_list $k"
+				                shift
+					fi
+				done ;;
+		-i) shift;
+					input_files="$@"
+					while [ "$#" -gt 0 ]; do
+						if [ ! -z "$1" ]; then
+							let j=$j+1
+							eval "input_file_$j=\"$1\""
+							input_file_list="$input_file_list $j"
+							shift
+						fi
+					done ;;
+		-h|-help|--help) help_text ;;
+		*) shift ;;
+	esac
+	done
+fi
+
+if [ "$WORKDIR" = "tmp_any2vob" ] && [ ! -d "tmp_any2vob" ]; then mkdir tmp_any2vob; fi
+	
+TOOLKIT=([1]=a52dec [2]=ecasound [3]=ffmpeg [4]=mencoder [5]=mpgtx [6]=mplayer [7]=mplex [8]=sndfile-convert [9]=tcextract)
+TOOLURL=([1]=http://liba52.sourceforge.net/ \
+[2]=http://eca.cx/ \
+[3]=http://ffmpeg.sourceforge.net/ \
+[4]=http://www.mplayerhq.hu/ \
+[5]=http://mpgtx.sourceforge.net/
+[6]=http://www.mplayerhq.hu/ \
+[7]=http://mjpeg.sourceforge.net/ \
+[8]=http://www.mega-nerd.com/libsndfile/ \
+[9]=http://www.transcoding.org/)
+TOOLMSG=([1]="Install with patch from here for 5.1 surround audio encodings ->\n \
+        http://mightylegends.zapto.org/dvd/ebuilds/media-libs/a52dec/files/multi_wav-0.7.4.diff\n\n \
+		*Instructions*\n \
+		tar -xvzf a52dec-0.7.4.tar.gz\n \
+		cd a52dec-0.7.4\n \
+		patch -p1 < ../multi_wav-0.7.4.diff\n \
+		./configure\n \
+		make\n \
+		make install\n")
+	if [ "$SURROUND" = "yes" ]; then
+		TOOLKIT=(${TOOLKIT[@]} [9]=multimux)
+		TOOLURL=(${TOOLURL[@]} [9]=http://panteltje.com/panteltje/dvd/)
+	fi
+		if [ "$AUD_FMT" = pcm16 ] || [ "$AUD_FMT" = pcm24 ]; then
+			TOOLKIT=(${TOOLKIT[@]} [9]=wav2lpcm)
+			TOOLURL=(${TOOLURL[@]} [9]=http://dvd-audio.sourceforge.net/wav2lpcm.tar.gz)
+		fi
+
+testprog () {
+	for p in $(echo $PATH | sed "s/:/\ /g"); do
+		if [ -x "$p/$1" ]; then
+			return 0
+		fi
+	done
+	errmsg Error: "Program '"$1"' is missing, please install it first ->  "${TOOLURL["$ARRAY"]}""
+	echo -e "	${TOOLMSG["$ARRAY"]}"
+	return 1
+}
+
+check_tools () {
+	ARRAY_NUM="${#TOOLKIT[@]}"
+	ARRAY="1"
+	while [ "$ARRAY" -le "$ARRAY_NUM" ]; do
+		testprog ${TOOLKIT["$ARRAY"]} || exit 0;
+		let ARRAY=$ARRAY+1
+	done
+	TOOLMSG=([1]=)	# Reset
+}
+
+spinner () {
+	spinners="| / - .\\"
+	PID=`ps aux | grep "$PROC" | grep -v grep | awk '{print $2}'`
+	until [ -z "$PID" ]; do
+		for spin in $spinners ; do
+			echo -n "$spin"
+			sleep 0.5
+			echo -e -n "\b"
+		done
+		PID=`ps aux | grep "$PROC" | grep -v grep | awk '{print $2}'`
+	done
+	echo "Done!"
+	echo ""
+}
+
+###########################################################################################################################
+
+file_type () {
+if [ ! -z "`mpgtx -N -i "$file" 2> /dev/null | grep "10.08 Mbps"`" ]; then file_type="DVD Vob"
+	elif [ ! -z "`echo "$file" | grep -E "mms:|http:|rtsp:"`" ]; then file_type="Streaming Media"
+	elif [ ! -z "`file -Lk "$file" | grep "ASCII"`" ] && [ ! -z "`grep -E "mms:|http:|rtsp:" "$file"`" ]; then file_type="Streaming Media"
+	elif [ ! -z "`mplayer -vo dummy -identify "$file" 2>&1 | grep "Nullsoft Stream"`" ]; then file_type="Nullsoft Streaming Video"
+	elif [ ! -z "`mplayer -vo dummy -identify "$file" 2>&1 | grep "\[VP62\]"`" ]; then file_type="VP62 AVI Video"
+	elif [ ! -z "`file -Lk "$file" | grep "Theora video"`" ]; then file_type="Theora/VP3 Video"
+	elif [ ! -z "`file -Lk "$file" | grep "(DV)"`" ]; then file_type="Raw DV Video"
+	elif [ ! -z "`tcprobe -i "$file" 2>&1 | grep "codec=dvsd"`" ]; then file_type="DV Avi Video"
+	elif [ ! -z "`file -Lk "$file" | grep AVI`" ]; then file_type="AVI"
+	elif [ ! -z "`mplayer -vo dummy -identify "$file" 2>&1 | grep "TS file format"`" ]; then file_type="MPEG Transport Stream"
+	elif [ ! -z "`tcprobe -i "$file" 2>&1 | grep MPEG`" ]; then file_type="MPEG"
+	elif [ ! -z "`file -Lk "$file" | grep ASF`" ]; then file_type="Microsoft ASF"
+	elif [ ! -z "`file -Lk "$file" | grep "Apple QuickTime"`" ]; then file_type="Apple QuickTime"
+	elif [ ! -z "`file -Lk "$file" | grep "OGM video"`" ]; then file_type="OGM video"
+	elif [ ! -z "`file -Lk "$file" | grep "Matroska"`" ]; then file_type="Matroska"
+	elif [ ! -z "`file -Lk "$file" | grep "ISO Media"`" ]; then file_type="MP4/3GP/3G2 ISO Media"
+	elif [ ! -z "`file -Lk "$file" | grep "RealMedia"`" ]; then file_type="Real Media"
+	elif [ ! -z "`mplayer -vo dummy -identify "$file" 2>&1 | grep MPEG-PS`" ]; then file_type="(S)VCD video"
+	elif [ ! -z "`head "$file" | grep MythTVVideo`" ]; then file_type="MythTV Nuppelvideo"
+	else
+		file_type="Unknown :("
+	fi
+}
+
+input_info () {
+	if [ "$file_type" = "MythTV Nuppelvideo" ]; then
+		SRC_FPS=`perl -x $0 $file | grep FPS | awk '{print $2}'`
+		SRC_WIDTH=`perl -x $0 $file | grep Width | awk '{print $2}'`
+		SRC_HEIGHT=`perl -x $0 $file | grep Height | awk '{print $2}'`
+	else
+		if [ "$file_type" = "Microsoft ASF" ]; then
+			WMV_ARGS="-mc 0.1"
+			SRC_FPS=`ffmpeg -i "$file" 2>&1 | grep "\->" | cut -d">" -f2| awk '{print $1}'`
+		else
+			SRC_FPS=`mplayer -vo dummy -identify "$file" 2>&1 | grep VIDEO_FPS | cut -d= -f2`
+		fi
+		SRC_WIDTH=`mplayer -vo dummy -identify "$file" 2>&1 | grep WIDTH | cut -d= -f2`
+		SRC_HEIGHT=`mplayer -vo dummy -identify "$file" 2>&1 | grep HEIGHT | cut -d= -f2`
+	fi
+	SRC_ASPECT=`mplayer -vo null -ao null -frames 5 "$file" 2>&1 | grep Movie-Aspect | awk '{print $3}' | cut -d: -f1`
+	if [ "$SRC_ASPECT" = "undefined" ]; then
+		SRC_ASPECT=`perl -le "printf ( '%.2f', $SRC_WIDTH / $SRC_HEIGHT )"`
+	fi
+}
+
+preview () {
+	if [ "$PREVIEW" = yes ]; then
+		if [ -z $DISPLAY ]; then
+			VO="fbdev2"
+			FB_CHECK=`cat /proc/fb`
+			VO_CHECK=`mplayer -vo help | grep fbdev2`
+			SC_FACTOR=`perl -le "print ( $ASPECT_E )"`
+			SC_WIDTH=`perl -le "print int( $SC_FACTOR * $HEIGHT )"`
+			SCALE_ARGS="-vf scale="$SC_WIDTH":"$HEIGHT""
+		else
+			VO="sdl"
+			VO_CHECK=`mplayer -vo help | grep sdl`
+			SCALE_ARGS=""
+		fi
+		if [ "$VO" = "fbdev2" ] && [ -z "$FB_CHECK" ]; then
+			echo ""
+			echo -e "\e[33;01m Warning: Preview has been selected, but no working kernel framebuffer can be found\e[m"
+			echo -e "\e[33;01m	    Preview disabled !!\e[m"
+			echo ""
+			PREVIEW="no"
+		elif [ "$VO" = "fbdev2" ] && [ -z "$VO_CHECK" ]; then
+			echo ""
+			echo -e "\e[33;01m Warning: Preview has been selected, but MPlayer has not been compiled with framebuffer support (--enable-fbdev)\e[m"
+			echo -e "\e[33;01m	    Disabling preview !!\e[m"
+			echo ""
+			PREVIEW="no"
+		elif [ "$VO" = "sdl" ] && [ -z "$VO_CHECK" ]; then
+			echo ""
+			echo -e "\e[33;01m Warning: Preview has been selected, but MPlayer has not been compiled with SDL support (--enable-sdl)\e[m"
+			echo -e "\e[33;01m	    Disabling preview !!\e[m"
+			echo ""
+			PREVIEW="no"
+		else
+			if [ "$file_type" = "MythTV Nuppelvideo" ]; then
+				PREVIEW_ARGS="-map 0:0 -f yuv4mpegpipe - | mplayer -nofs -vo $VO $SCALE_ARGS -aspect $ASPECT_T -osdlevel 2 - &> /dev/null"
+			elif [ "$file_type" = "DV Avi Video" ]; then
+				if [ ! -p "$WORKDIR"/stream.yuv ]; then
+					mkfifo "$WORKDIR"/stream.yuv
+				fi
+				TEE_ARGS="| tee -a "$WORKDIR"/stream.yuv"
+				PREVIEW_ARGS="mplayer -noconsolecontrols -nofs -vf pp=lb -vo $VO $SCALE_ARGS -aspect $ASPECT_T -osdlevel 2 "$WORKDIR"/stream.yuv &> /dev/null &"
+			else
+				PREVIEW_ARGS="-f yuv4mpegpipe - 2> /dev/null | mplayer -nofs -vo $VO $SCALE_ARGS -aspect $ASPECT_T -osdlevel 2 - &> /dev/null &"
+			fi
+		fi
+	fi
+}
+
+
+ffmpeg_crop () {
+		T_REAL_WIDTH=`perl -le "print ( $HEIGHT / ( $ASPECT_E ))"`
+		S_REAL_WIDTH=`perl -le "print ( $HEIGHT / $SRC_ASPECT )"`
+		CLIP=`perl -le "print int(( $T_REAL_WIDTH - $S_REAL_WIDTH ) / 2 )"`
+		# Even up $CLIP #
+		CLIP=`perl -le "print int( $CLIP / 2 ) * 2"`
+		if [ ! -z `echo $CLIP | grep "-"` ]; then
+			CLIP=`echo $CLIP | sed 's/-//g'`
+		fi
+		CROP_ARGS="-padtop "$CLIP" -padbottom "$CLIP""
+}
+
+dimension_set () {
+	WIDTH="720"
+	HEIGHT="576"
+	if [ $COMPRESS = "yes" ]; then
+		WIDTH="352"
+		if [ $FORMAT = "pal" ]; then
+			HEIGHT="288"
+		elif [ $FORMAT = "ntsc" ]; then
+			HEIGHT="240"
+		fi
+	fi
+	if [ $COMPRESS = "no" ]; then
+		WIDTH="720"
+		if [ $FORMAT = "pal" ]; then
+			HEIGHT="576"
+		elif [ $FORMAT = "ntsc" ]; then
+			HEIGHT="480"
+		fi
+	fi
+}
+
+no_audio () {
+	ffmpeg -y -ar 48000 -ab 224 -ac 2 -t 5 "$name".ac3
+	AUDIO="no"
+}
+
+
+preformat_check () {
+	if [ ! -z `echo "$file" | grep [0-9].nuv` ] && [ "$file_type" = "MPEG" ]; then mythtv
+	elif [ "$file_type" = "DVD Vob" ]; then dvd_vob
+	elif [ "$file_type" = AVI ]; then
+		if [ "`tcprobe -i "$file" 2>&1 | grep audio | wc -l`" -gt 1 ]; then
+			multi_format
+		else
+			return
+		fi
+	elif [ "$file_type" = "MPEG" ]; then return
+	elif [ "$file_type" = "Raw DV Video" ]; then return
+        elif [ "$file_type" = "DV Avi Video" ]; then dv_avi
+	elif [ "$file_type" = "MPEG Transport Stream" ]; then mpegts
+	elif [ "$file_type" = "Apple QuickTime" ]; then multi_format
+	elif [ "$file_type" = "Matroska" ]; then matroska
+	elif [ "$file_type" = "OGM video" ]; then ogm
+	elif [ "$file_type" = "MythTV Nuppelvideo" ]; then mythtv
+	elif [ "$file_type" = "Streaming Media" ]; then stream_media
+	else
+		if [ "$file_type" = "VP62 AVI Video" ] || \
+			[ "$file_type" = "Theora/VP3 Video" ]; then
+			warn Warning: Audio for this filetype is not yet supported in Linux, the encoded file will be silent!
+			no_audio
+		fi
+		MENCODER="yes"
+	fi
+}
+
+surround_check () {
+	if [ ! -z "`mplayer -vo dummy -identify "$file" 2>&1 | grep "(DTS)"`" ]; then
+		HAS_DTS="yes"
+		AUDIO_ARGS=""
+		HAS_SURROUND="yes"
+		good "$file" already has a DTS surround sound audio track, extracting...
+		good Running: "tcextract -i "$file" -a0 -x dts > $WORKDIR/$name.dts"
+		IFS="
+		"
+			tcextract -d2 -i $file -a0 -x dts > $WORKDIR/$name.dts
+		IFS=" "
+		if [ "$KEEP_DTS" = no ] || [ "$SURROUND" = no ]; then
+			audio_convert "$WORKDIR"/"$name".dts
+		else
+			AUD_FILE="$WORKDIR"/"$name".dts
+		fi
+	elif [ ! -z "`mplayer -vo dummy -identify "$file" 2>&1 | grep "5.1 ("`" ]; then
+		AUDIO_ARGS=""
+		HAS_SURROUND="yes"
+		good "$file" already has a 5.1 Dolby surround sound audio track, extracting...
+		good Running: "tcextract -d2 -i "$file" -a0 -x ac3 | tcextract -d2 -x ac3 -t raw > $WORKDIR/$name.ac3"
+                IFS="
+		"
+			tcextract -d2 -i $file -a0 -x ac3 | tcextract -d2 -x ac3 -t raw > $WORKDIR/$name.ac3
+                IFS=" "
+	else
+		HAS_SURROUND="no"
+	fi
+}
+
+file_preformat () {
+	if [ "$MENCODER" = yes ]; then
+		warn Preformatting...
+			mencoder -o "$WORKDIR"/"$file_nopath".avi -ovc lavc -lavcopts vbitrate=5000:mbd=1:v4mv -oac pcm -srate 48000 -ofps $SRC_FPS $WMV_ARGS "$file" &> /dev/null &
+			stream_temp="$file"
+		sleep 5s
+		PROC="mencoder -o"
+			echo -en "\e[32;01m Running:\e[m mencoder -o $WORKDIR/$file_nopath.avi -ovc lavc -lavcopts vbitrate=5000:mbd=1:v4mv -oac pcm -srate 48000 -ofps $SRC_FPS $WMV_ARGS $file..."
+		spinner
+		if [ ! -f "$WORKDIR"/"$file_nopath".avi 2> /dev/null ]; then
+			echo ""
+			errmsg Error: File preformat failed for "$file", file not successfully encoded!
+			echo "ENCODING ERROR" >> $VAR_DATAFILE
+			exit
+		fi
+		MENCODER="no"	# Reset
+		menc_file="$WORKDIR"/"$file_nopath".avi
+		file="$WORKDIR"/"$file_nopath".avi
+		if [ "$streaming_media" = "yes" ]; then
+			rm "$stream_temp"
+		fi
+	fi
+}
+
+vob_skip () {
+	if [ "$SRC_FPS" = "$FPS" ] && \
+		[ "$VOB_ASPECT" = "$ASPECT_T" ] && \
+		[ "$SRC_WIDTH"x"$SRC_HEIGHT" = "$WIDTH"x"$HEIGHT" ] && \
+		[ "$VOB_AUDIO" = "$AUD_FMT" ]; then
+			echo ""
+			echo -e "\e[33;01m Skipping encoding for "$file"...\e[m"
+			echo -e "\e[33;01m      Already a dvdauthorable VOB with matching attributes!!\e[m"
+			echo ""
+			SKIP_VOB="yes"
+		[ -z "$EXTSUB" ] && echo "$file" >> $VAR_DATAFILE
+	else
+		return
+	fi
+}
+
+bitrate_calc () {
+	file_type
+	if [ "$file_type" != "Streaming Media" ] && [ "$file_type" != "Unknown :(" ]; then
+		if [ "$file_type" = "MythTV Nuppelvideo" ]; then
+		        myth_file=`echo "$file" | awk -F"/" '{print $NF}'`
+			startid=`echo $myth_file | cut -d_ -f2`
+			startyear=`echo $startid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $1 }'`
+			startmonth=`echo $startid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $2 }' | sed -e 's/^0//'`
+			startday=`echo $startid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $3 }'`
+			starthour=`echo $startid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $4 }'`
+			startminute=`echo $startid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $5 }'`
+			endid=`echo $myth_file | cut -d_ -f3`
+			endyear=`echo $endid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $1 }'`
+			endmonth=`echo $endid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $2 }' | sed -e 's/^0//'`
+			endday=`echo $endid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $3 }'`
+			endhour=`echo $endid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $4 }'`
+			endminute=`echo $endid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $5 }'`
+			MONTH=([1]=January [2]=February [3]=March [4]=April [5]=May [6]=June [7]=July [8]=August [9]=September [10]=October [11]=November [12]=December)
+			END_SECS=`eval date +%s -d \"$endday ${MONTH[$endmonth]} $endyear $endhour:$endminute\"`
+			START_SECS=`eval date +%s -d \"$startday ${MONTH[$startmonth]} $startyear $starthour:$startminute\"`
+			DURATION=`perl -le "print ( $END_SECS - $START_SECS )"`
+		else
+			if [ -z "`ffmpeg -i "$file" 2>&1 | grep Duration | awk '{print $2}' | grep "N/A"`" ] && [ "$file_type" != "OGM video" ]; then
+				DUR_HOURS=`ffmpeg -i "$file" 2>&1 | grep Duration | cut -d: -f2 | sed 's/ //' | sed -e 's/^0//'`
+				DUR_MINS=`ffmpeg -i "$file" 2>&1 | grep Duration | cut -d: -f3 | sed 's/ //' | sed -e 's/^0//'`
+				DUR_SECS=`ffmpeg -i "$file" 2>&1 | grep Duration | cut -d: -f4 | cut -d. -f1 | sed 's/ //' | sed -e 's/^0//'`
+				DURATION=`perl -le "print ( (($DUR_HOURS*60)*60) + ($DUR_MINS*60) + $DUR_SECS )"`
+			else
+				DURATION=`mplayer -vo dummy -identify "$file" 2>&1 | grep ID_LENGTH | cut -d= -f2`
+			fi
+		fi
+		VIDEO_SIZE=`perl -le "print int( ( ( 4500 * $DURATION ) / 8 ) / 1024 )"`
+		AUDIO_SIZE=`perl -le "print int( ( ( 380 * $DURATION ) / 8 ) / 1024 )"`
+		if [ "$COMPRESS" = "yes" ]; then
+			FILE_SIZEMB=`perl -le "print int( ( $VIDEO_SIZE + $AUDIO_SIZE ) / 2 )"`
+		else
+			FILE_SIZEMB=`perl -le "print int( $VIDEO_SIZE + $AUDIO_SIZE )"`
+		fi
+		FILE_SIZEGB=`perl -le "printf ( '%.2f', $FILE_SIZEMB / 1024 )"`
+		if [ "$CALC" = "yes" ]; then
+			echo ""
+			echo -e "\e[32;01m "$file"\e[m"
+			if [ "$FILE_SIZEMB" = 0 ] || [ "$FILE_SIZEGB" = 0 ]; then
+				echo -e "\e[33;01m Warning: "$file" does not contain enough info to caclulate disk space!!\e[m"			
+			elif [ "$FILE_SIZEMB" -lt 1024 ]; then
+				echo -e "\e[33;01m Final estimated filesize:  "$FILE_SIZEMB" MB\e[m"
+			else
+				echo -e "\e[33;01m Final estimated filesize:  "$FILE_SIZEGB" GB\e[m"
+			fi
+		fi
+	fi
+}
+
+total_diskspace () {
+	for i in $input_file_list; do
+		var="\$input_file_$i";
+		eval "file=\"$var\"";
+		file_type
+		if [ "$file_type" != "Streaming Media" ]; then
+			if [ ! -f "$file" ]; then
+				errmsg Error: $file does not exist
+				exit
+			fi
+		fi
+		bitrate_calc
+		TOTAL_SIZEMB=`perl -le "print ( $TOTAL_SIZEMB + $FILE_SIZEMB + 300 )"`
+	done
+	TOTAL_SIZEGB=`perl -le "printf ( '%.2f', $TOTAL_SIZEMB / 1024 )"`
+	echo -e "\e[33;01m Total estimated DVD Disc usage:  "$TOTAL_SIZEGB" GB\e[m"
+	echo
+	if [ "$TOTAL_SIZEMB" -gt 4700 ]; then
+		errmsg WARNING: "Total estimated DVD Disc usage has been calculated at "$TOTAL_SIZEGB"GB"
+		echo -e -n "     This will not fit on a 4.7GB DVD Disc, are you sure you want to continue ? \033[1m(yes/no)\e[m "
+		read continue
+		[ "$continue" != "yes" ] && echo && exit
+		echo
+	fi
+}
+
+##########################################################################################################################
+
+dvd_vob () {
+	TOOLKIT=([1]=spuunmux)
+	TOOLURL=([1]=http://sourceforge.net/projects/dvdauthor/)
+	check_tools
+        VOB_ASPECT=`tcprobe -i "$file" 2> /dev/null | grep "aspect ratio" | awk '{print $3}'`
+        VOB_AUDIO=`ffmpeg -i "$file" 2>&1 | grep Audio | awk '{print $4}' | cut -d, -f1 | head -n1`
+        VOB_CHANS=`ffmpeg -i "$file" 2>&1 | grep Audio | awk '{print $7}' | cut -d, -f1`
+	vob_skip
+        if [ "$VOB_CHANS" = "stereo" ] && [ "$SURROUND" = "no" ] && [ "$SKIP_VOB" != "yes" ]; then vob_skip
+        elif [ "$VOB_CHANS" = "5:1" ] && [ "$SURROUND" = "yes" ] && [ "$SKIP_VOB" != "yes" ]; then vob_skip
+	elif [ "$SKIP_VOB" = "yes" ]; then return
+	fi
+	if [ "`ffmpeg -i "$file" 2>&1 | grep Audio | wc -l`" -gt 1 ]; then
+		ffmpeg -i "$file" 2>&1 | grep Audio > "$WORKDIR"/ffmpeg_audio.dat
+		LINE=1
+		LINES=`cat "$WORKDIR"/ffmpeg_audio.dat | wc -l`
+		echo ""
+		echo "Number of AUDIO tracks detected: `cat "$WORKDIR"/ffmpeg_audio.dat | grep Audio | wc -l`"
+		while [ $LINE -le $LINES ]; do
+			line=`sed -n "$LINE"p "$WORKDIR"/ffmpeg_audio.dat`
+			AUD=`echo $line | grep Audio`
+			if [ ! -z "$AUD" ]; then
+				AUD_ID=`echo $line | awk '{print $2}' | cut -d. -f2 | cut -d: -f1 | cut -d[ -f1`
+				echo ""
+				good Running: ffmpeg -y -i "$file" -map 0:"$AUD_ID" -ar 48000 -ab 384 "$WORKDIR"/"$name"-a"$AUD_ID".ac3
+				ffmpeg -y -i "$file" -map 0:"$AUD_ID" -ar 48000 -ab 384 "$WORKDIR"/"$name"-a"$AUD_ID".ac3
+				audio_convert "$name"-a"$AUD_ID".ac3
+			fi
+		let LINE=$LINE+1
+		done
+		AUD_FILE=`ls -1 "$WORKDIR"/"$name"-a*.* | sed 's/^/"/;s/$/"/' | paste -s -d" "`
+	fi
+
+	SUB_NUM=`tcprobe -H300 -i "$file" 2>&1 | grep subtitle | cut -d\( -f2 | cut -d\) -f1`
+	SUB_ID=0
+	curr_dir=`pwd`
+	if [ ! -z "$SUB_NUM" ]; then
+		while [ $SUB_ID -lt $SUB_NUM ]; do
+			cd "$WORKDIR"
+			if [ -f "$file_nopath" ]; then
+				spuunmux -o vobsub_"$SUB_ID" -s"$SUB_ID" "$curr_dir"/"$file"
+			else
+				spuunmux -o vobsub_"$SUB_ID" -s"$SUB_ID" "$file"
+			fi
+			LINE=3
+			LINES=`cat "$WORKDIR"/vobsub_"$SUB_ID".xml | wc -l`
+			let LINES=$LINES-2
+			while [ $LINE -le $LINES ]; do
+				original_yoffset=`sed -n "$LINE"p "$WORKDIR"/vobsub_"$SUB_ID".xml | awk '{print $6}' | cut -d\" -f2`
+				let YOFFSET=$SRC_HEIGHT-$original_yoffset
+				let SUB_YOFFSET=$HEIGHT-$YOFFSET
+				sed -i ""$LINE"s/yoffset=\(.*[0-9]\)\"/yoffset=\"$SUB_YOFFSET\"/" "$WORKDIR"/vobsub_"$SUB_ID".xml
+				let LINE=$LINE+1
+			done
+			let SUB_ID=$SUB_ID+1
+		done
+		VOBSUBS="yes"
+		cd "$curr_dir"
+	fi
+}
+
+dv_avi () {
+        TOOLKIT=([1]=soundstretch [2]=lav2yuv [3]=lav2wav [4]=mpeg2enc)
+        TOOLURL=([1]=http://sky.prohosting.com/oparviai/soundtouch/ \
+		[2]=http://mjpeg.sourceforge.net/ \
+		[3]=http://mjpeg.sourceforge.net/ \
+		[4]=http://mjpeg.sourceforge.net/)
+        check_tools
+	preview
+	encode_skip="yes"
+	FIELD_ARGS="yuvcorrect"
+	if [ "$SRC_FPS" != "$FPS" ]; then
+		if [ "$FORMAT" = "pal" ]; then FIELD_ARGS="yuvcorrect -T TOP_FORWARD -T INTERLACED_TOP_FIRST"
+		elif [ "$FORMAT" = "ntsc" ]; then FIELD_ARGS="yuvcorrect -T BOTT_FORWARD -T INTERLACED_BOTTOM_FIRST"
+		fi
+	fi
+	# '--compress=yes' gives undesirable rippling effects, so is not used in this instance #
+        if [ "$FORMAT" = "pal" ]; then SCALE_ARGS="yuvscaler -O SIZE_720x576"
+	elif [ "$FORMAT" = "ntsc" ]; then SCALE_ARGS="yuvscaler -O SIZE_720x480"
+	fi
+	eval lav2yuv -P $ASPECT_T \""$file"\" \| $FIELD_ARGS \| yuvfps -c -r "$MFPS" \| $SCALE_ARGS $TEE_ARGS \| mpeg2enc -a"$ASPECT" -f8 -s -o \""$WORKDIR"/"$name".m2v\" &> /dev/null &
+	sleep 5s
+	PROC="lav2yuv -P"
+	eval "$PREVIEW_ARGS"
+	echo ""
+	echo -en "\e[32;01m Running:\e[m lav2yuv -P $ASPECT_T $file | $FIELD_ARGS | yuvfps -c -r $MFPS | $SCALE_ARGS | mpeg2enc -a$ASPECT -f8 -s -o $WORKDIR/$name.m2v..."
+	spinner
+	good Running: "lav2wav $file > "$WORKDIR"/"$name"_tmp.wav"
+	IFS="
+"
+		eval lav2wav \""$file"\" > "$WORKDIR"/"$name"_tmp.wav 2> /dev/null
+	IFS=" "
+	AUDIO_OFFSET=`perl -le "print ( (($FPS / $SRC_FPS) - 1) * 100 )"`
+	good Running: "soundstretch "$WORKDIR"/"$name"_tmp.wav "$WORKDIR"/"$name".wav -tempo="$AUDIO_OFFSET""
+		soundstretch "$WORKDIR"/"$name"_tmp.wav "$WORKDIR"/"$name".wav -tempo="$AUDIO_OFFSET" &> /dev/null
+        good Running: "ffmpeg -y -i $WORKDIR/$name.wav -ar 48000 -ab 384 -ac 2 $WORKDIR/$name.ac3"
+		ffmpeg -y -i "$WORKDIR"/"$name".wav -ar 48000 -ab 384 -ac 2 "$WORKDIR"/"$name".ac3
+	rm "$WORKDIR"/"$name".wav "$WORKDIR"/"$name"_tmp.wav "$WORKDIR"/stream.yuv 2> /dev/null
+}
+
+mythtv () {
+	TOOLKIT=([1]=mythcommflag [2]=mythtranscode)
+	TOOLURL=([1]=http://www.mythtv.org/ [2]=http://www.mythtv.org/)
+	check_tools
+	USER=mythtv
+	PASS=mythtv
+	DB=mythconverg
+	if [ -z "`mysqlcheck -u$USER -p$PASS $DB 2>&1 | grep OK`" ]; then
+		errmsg Error: "Cannot connect to MySQL database '"$DB"'"
+		echo "ENCODING ERROR" >> $VAR_DATAFILE
+		exit
+	fi
+	myth_file=`echo "$file" | awk -F"/" '{print $NF}'`
+	chanid=`echo $myth_file | cut -d_ -f1`
+	id=`echo $myth_file | cut -d_ -f2`
+	year=`echo $id | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $1 }'`
+	month=`echo $id | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $2 }'`
+	day=`echo $id | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $3 }'`
+	hour=`echo $id | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $4 }'`
+	minute=`echo $id | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $5 }'`
+	endid=`echo $myth_file | cut -d_ -f3`
+	endhour=`echo $endid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $4 }'`
+	endminute=`echo $endid | awk 'BEGIN { FIELDWIDTHS = "4 2 2 2 2" } ; { print $5 }'`
+	title=`echo "SELECT title FROM recorded WHERE starttime LIKE '"$year"-"$month"-"$day" "$hour":"$minute"%'" | \
+		mysql -u$USER -p$PASS $DB -N | sed 's/ /_/'`
+	name=""$title"_"$year"-"$month"-"$day"_"$hour":"$minute"_to_"$endhour":"$endminute""
+	if [ "$SKIP_COMM" = "yes" ]; then
+		echo ""
+		echo -e "\e[33;01m Skipping MythTV detected commercials...\e[m"
+		CUTLIST_ARGS="-l"
+		mythcommflag -c $chanid -s $year-$month-$day-$hour-$minute-00 --gencutlist 2>&1 > /dev/null
+	fi
+	rm -rf /tmp/mythfifo-* 2> /dev/null
+	mkdir /tmp/mythfifo-"$id"
+	ffmpeg_crop
+	preview
+	if [ "$file_type" = MPEG ]; then
+		return
+	else
+		good Running: "mythtranscode --fifosync -c $chanid -s $year-$month-$day-$hour-$minute-00 -f "/tmp/mythfifo-$id/" -p autodetect $CUTLIST_ARGS"
+		mythtranscode --fifosync -c $chanid -s $year-$month-$day-$hour-$minute-00 -f "/tmp/mythfifo-$id/" -p autodetect $CUTLIST_ARGS &
+		sleep 5s
+		MY_WORKDIR=`echo "$WORKDIR" | sed 's/ /\\\ /g'`
+		MY_name=`echo "$name" | sed 's/ /\\\ /g'`
+		if [ ! -z "`echo $CROP_ARGS | grep pad`" ]; then        # Must pipe through an extra ffmpeg process to correctly convert aspect ratio
+	good Running: "ffmpeg -y -f s16le -ar 48000 -ac 2 -i /tmp/mythfifo-$id/audout -ar 48000 -ab 384 -ac 2 "$MY_WORKDIR"/"$MY_name".ac3 &> /dev/null & \
+ffmpeg -y -f rawvideo -s "$SRC_WIDTH"x"$SRC_HEIGHT" -i /tmp/mythfifo-$id/vidout -f mpeg2video $CROP_ARGS -aspect $ASPECT_T \
+-b 5000 -r $FORMAT - 2> /dev/null | ffmpeg -y -i - -aspect $ASPECT_T -b 5000 -bufsize 224 -maxrate \
+7000 -s "$WIDTH"x"$HEIGHT" -map 0:0 -f mpeg2video "$MY_WORKDIR"/"$MY_name".m2v $PREVIEW_ARGS"
+ffmpeg -y -f s16le -ar 48000 -ac 2 -i /tmp/mythfifo-$id/audout -ar 48000 -ab 384 -ac 2 "$MY_WORKDIR"/"$MY_name".ac3 &> /dev/null &
+COMMAND="ffmpeg -y -f rawvideo -s "$SRC_WIDTH"x"$SRC_HEIGHT" -i /tmp/mythfifo-$id/vidout -f mpeg2video $CROP_ARGS -aspect $ASPECT_T \
+-b 5000 -r $FORMAT - 2> /dev/null | ffmpeg -y -i - -aspect $ASPECT_T -b 5000 -bufsize 224 -maxrate \
+7000 -s "$WIDTH"x"$HEIGHT" -map 0:0 -f mpeg2video "$MY_WORKDIR"/"$MY_name".m2v $PREVIEW_ARGS"
+		else
+	good Running: "ffmpeg -y -f s16le -ar 48000 -ac 2 -i /tmp/mythfifo-$id/audout -ar 48000 -ab 384 -ac 2 "$MY_WORKDIR"/"$MY_name".ac3 &> /dev/null & \
+ffmpeg -y -f rawvideo -s "$SRC_WIDTH"x"$SRC_HEIGHT" -i /tmp/mythfifo-$id/vidout -f mpeg2video $CROP_ARGS -aspect $ASPECT_T \
+-b 5000 -bufsize 224 -maxrate 7000 -s "$WIDTH"x"$HEIGHT" -r $FORMAT -map 0:0 -f mpeg2video "$MY_WORKDIR"/"$MY_name".m2v $PREVIEW_ARGS"
+ffmpeg -y -f s16le -ar 48000 -ac 2 -i /tmp/mythfifo-$id/audout -ar 48000 -ab 384 -ac 2 "$MY_WORKDIR"/"$MY_name".ac3 &> /dev/null &
+COMMAND="ffmpeg -y -f rawvideo -s "$SRC_WIDTH"x"$SRC_HEIGHT" -i /tmp/mythfifo-$id/vidout -f mpeg2video $CROP_ARGS -aspect $ASPECT_T \
+-b 5000 -bufsize 224 -maxrate 7000 -s "$WIDTH"x"$HEIGHT" -r $FORMAT -map 0:0 -f mpeg2video "$MY_WORKDIR"/"$MY_name".m2v $PREVIEW_ARGS"
+		fi
+	eval $COMMAND
+	fi
+}
+
+matroska () {
+	TOOLKIT=([1]=mkvextract)
+	TOOLURL=([1]=http://www.bunkus.org/videotools/mkvtoolnix/)
+	check_tools
+	mplayer -vo dummy -ao null "$file" 2> /dev/null | grep "Track ID" > "$WORKDIR"/matroska.dat
+	echo ""
+	echo "Number of VIDEO tracks detected: `cat "$WORKDIR"/matroska.dat | grep video | wc -l`"
+	echo "Number of AUDIO tracks detected: `cat "$WORKDIR"/matroska.dat | grep audio | wc -l`"
+	echo "Number of SUBTITLE tracks detected: `cat "$WORKDIR"/matroska.dat | grep subtitles | wc -l`"
+	LINE=1
+	LINES=`cat "$WORKDIR"/matroska.dat | wc -l`
+	while [ $LINE -le $LINES ]; do
+		line=`sed -n "$LINE"p "$WORKDIR"/matroska.dat`
+		VIDEO=`echo $line | grep video | cut -d: -f1 | awk '{print $4}'`
+		AUDIO=`echo $line | grep audio | cut -d: -f1 | awk '{print $4}'`
+		SUBTITLE=`echo $line | grep subtitles | cut -d: -f1 | awk '{print $4}'`
+		if [ ! -z "$VIDEO" ]; then
+			good Running: mkvextract tracks "$file" $VIDEO:"$WORKDIR"/"$name"-v$VIDEO.avi
+			mkvextract tracks "$file" $VIDEO:"$WORKDIR"/"$name"-v$VIDEO.avi
+		elif [ ! -z "$AUDIO" ]; then
+			good Running: mkvextract tracks "$file" $AUDIO:"$WORKDIR"/"$name"-a$AUDIO.ogg
+			mkvextract tracks "$file" $AUDIO:"$WORKDIR"/"$name"-a$AUDIO.ogg
+			good Running: ffmpeg -y -i "$WORKDIR"/"$name"-a$AUDIO.ogg -ar 48000 -ab 384 -ac 2 "$WORKDIR"/"$name"-a$AUDIO.ac3
+			ffmpeg -y -i "$WORKDIR"/"$name"-a$AUDIO.ogg -ar 48000 -ab 384 -ac 2 "$WORKDIR"/"$name"-a$AUDIO.ac3
+			rm "$WORKDIR"/"$name"-a$AUDIO.ogg
+			audio_convert "$WORKDIR"/"$name"-a$AUDIO.ac3
+		elif [ ! -z "$SUBTITLE" ]; then
+			good Running: mkvextract tracks "$file" -c $SUBCHARACTERSET $SUBTITLE:"$WORKDIR"/$SUBTITLE:"$name"-$SUBTITLE-subtitle-a2vsub
+			mkvextract tracks "$file" -c $SUBCHARACTERSET $SUBTITLE:"$WORKDIR"/"$name"-$SUBTITLE-subtitle-a2vsub
+		fi
+		let LINE=$LINE+1
+	done
+	AUDIO_ARGS=""
+	SUBS=`ls -v "$WORKDIR"/*-subtitle-a2vsub 2> /dev/null`
+	AUD_FILE=`ls -1 "$WORKDIR"/"$name"-a*.ac3 | sed 's/ /\\\ /g' | paste -s -d" "`
+	IFS="
+	"
+		for i in `ls "$WORKDIR"/"$name"-v*.avi`; do
+			file="$i"
+			name=`echo $i | awk -F"/" '{print $NF}' | sed 's/.\{4\}$//'`
+			IFS=" "
+			encode
+			rm "$i"
+			mux
+			subtitles
+		done
+	rm "$WORKDIR"/matroska.dat "$WORKDIR"/"$name"-v*.avi "$WORKDIR"/"$name"-a*.ac3 2> /dev/null
+}
+
+ogm () {
+	TOOLKIT=([1]=ogmdemux)
+	TOOLURL=([1]=http://www.bunkus.org/videotools/ogmtools/)
+	check_tools
+# Ogmdemux has a bug where it won't write any output files outside the current directory #
+# To workaround we 'cd $WORKDIR' then symlink back to $file #
+	curr_dir=`pwd`
+	relpath=`echo "$file" | sed "s/$file_nopath//g"`
+	cd "$relpath"
+	full_path=`pwd`
+	IFS="
+	"
+	cd "$WORKDIR"
+	[ -L ogm_file.ogm ] && rm ogm_file.ogm
+	CMD="ln -s \""$full_path"/"$file"\" ogm_file.ogm"
+	eval $CMD
+	good Running: "ogmdemux -v "$file" -o "$WORKDIR"/"$name""
+	ogmdemux -v ogm_file.ogm -nt -o "$name" > ogm.dat
+	ogmdemux -v ogm_file.ogm -nv -na -o "$name"-subtitle-a2vsub >> ogm.dat
+	cd $curr_dir
+	cat "$WORKDIR"/ogm.dat | grep Extracting | cut -d\" -f2 > "$WORKDIR"/ogm.dat
+	for i in `cat "$WORKDIR"/ogm.dat`; do echo "$WORKDIR/$i" >> "$WORKDIR"/ogm_tmp.dat; done
+	IFS=" "
+	mv "$WORKDIR"/ogm_tmp.dat "$WORKDIR"/ogm.dat
+	echo "Number of VIDEO tracks detected: `cat "$WORKDIR"/ogm.dat | grep .avi | wc -l`"
+	echo "Number of AUDIO tracks detected: `cat "$WORKDIR"/ogm.dat | grep .ogg | wc -l`"
+	echo "Number of SUBTITLE tracks detected: `cat "$WORKDIR"/ogm.dat | grep .srt | wc -l`"
+	# Video/Audio tracks #
+	LINE=1
+	LINES=`cat "$WORKDIR"/ogm.dat | wc -l`
+	while [ $LINE -le $LINES ]; do
+		line=`sed -n "$LINE"p "$WORKDIR"/ogm.dat`
+		AUDIO=`echo $line | grep .ogg`
+		if [ ! -z "$AUDIO" ]; then
+			good Running: "ffmpeg -y -i "$AUDIO" -ar 48000 -ab 384 -ac 2 "$WORKDIR"/"$name"-"$LINE"-audio.ac3"
+			ffmpeg -y -i "$AUDIO" -ar 48000 -ab 384 -ac 2 "$WORKDIR"/"$name"-"$LINE"-audio.ac3
+			audio_convert "$WORKDIR"/"$name"-"$LINE"-audio.ac3
+		fi
+		let LINE=$LINE+1
+	done
+	SUBS=`cat "$WORKDIR"/ogm.dat | grep .srt`
+	AUD_FILE=`find "$WORKDIR" -name "$name-*-audio.*" -exec echo \"{}\" \; | paste -s -d" "`
+	IFS="
+	"
+	for i in `cat "$WORKDIR"/ogm.dat | grep .avi`; do
+		file="$i"
+		name=`echo "$i" | awk -F"/" '{print $NF}' | sed 's/.\{4\}$//'`
+		IFS=" "
+		encode
+		mux
+		subtitles
+	done
+	IFS="
+	"
+	for i in `cat "$WORKDIR"/ogm.dat` ; do rm "$i" ; done
+	IFS=" "
+	rm "$WORKDIR"/ogm.dat "$WORKDIR"/ogm_file.ogm "$WORKDIR"/*-*-audio.* 2> /dev/null
+}
+
+mpegts ()  {
+	## Encode first PID only ##
+	if [ $MPEGTS_PIDS != "yes" ]; then
+		encode
+		audio_convert "$WORKDIR"/"$name".ac3
+		mux
+		subtitles
+	else
+		## Encode ALL PIDs ##
+		TOOLKIT=([1]=replex)
+		TOOLURL=([1]=http://www.metzlerbros.org/dvb/)
+		check_tools
+		mplayer -vo dummy -identify "$file" 2>&1 | sed -n '/PROBING UP/,/VIDEO MPEG2/p' > "$WORKDIR"/mts.dat.tmp
+		echo "" > "$WORKDIR"/mts.dat
+		# Probe & extract relevant video streams #
+		VID_ID=`grep ID_VIDEO_ID "$WORKDIR"/mts.dat.tmp | head -n1`
+		until [ -z "$VID_ID" ]; do
+			VID_ID=`grep ID_VIDEO_ID "$WORKDIR"/mts.dat.tmp | head -n1`
+			echo "$VID_ID" >> "$WORKDIR"/mts.dat
+			sed -i "s/"$VID_ID"//" "$WORKDIR"/mts.dat.tmp 2> /dev/null
+		done
+		sed -i "/^$/d" "$WORKDIR"/mts.dat
+		rm "$WORKDIR"/mts.dat.tmp
+		VID_NUM=`cat "$WORKDIR"/mts.dat | grep VIDEO_ID | wc -l`
+		echo ""
+		echo "Number of VIDEO tracks detected: "$VID_NUM""
+		# Match each video stream to the correct audio stream for replexing #
+		for i in `cat "$WORKDIR"/mts.dat`; do
+			VID_ID=`echo $i | cut -d= -f2`
+			AUD_ID=`mplayer -vo dummy -vid $VID_ID "$file" 2>&1 | grep "VIDEO MPEG2" | cut -d= -f3 | cut -d\) -f1`
+			VID_HEX=`replex --scan -o "$file" 2>&1 | grep "("$VID_ID")" | cut -d: -f2 | awk '{print $1}'`
+			AUD_HEX=`replex --scan -o "$file" 2>&1 | grep "("$AUD_ID")" | cut -d: -f2 | awk '{print $1}'`
+			if [ ! -z "`replex --scan -o "$file" 2>&1 | grep "("$AUD_ID")" | grep ac3pid`" ]; then
+				good Running: replex -v "$VID_HEX" -c "$AUD_HEX" -t DVD -k -o "$WORKDIR"/"$name"-v"$VID_ID".mps "$file"
+				replex -v "$VID_HEX" -c "$AUD_HEX" -t DVD -k -o "$WORKDIR"/"$name"-v"$VID_ID".mps "$file"
+			else
+				good Running: replex -v "$VID_HEX" -a "$AUD_HEX" -t DVD -k -o "$WORKDIR"/"$name"-v"$VID_ID".mps "$file"
+				replex -v "$VID_HEX" -a "$AUD_HEX" -t DVD -k -o "$WORKDIR"/"$name"-v"$VID_ID".mps "$file"
+			fi
+		done
+		rm "$WORKDIR"/mts.dat
+		# Encode & Mux #
+		IFS="
+		"
+		for i in `ls "$WORKDIR"/"$name"-v*.mps`; do
+			file="$i"
+			name=`echo "$file" | awk -F"/" '{print $NF}' | sed 's/.\{4\}$//'`
+			IFS=" "
+			surround_check
+			input_info
+			encode
+			rm "$i"
+			audio_convert "$WORKDIR"/"$name".ac3
+			mux
+			subtitles
+		done
+	fi
+}
+
+multi_format () {	# Processes Apple Quicktime + Multi-track AVI
+	file_type="multi-format"
+	ffmpeg -i "$file" 2>&1 | grep Stream > "$WORKDIR"/ffmpeg.dat
+	mplayer -vo dummy -identify "$file" 2>&1 | grep ID_AUDIO_ID | cut -d= -f2 > "$WORKDIR"/mplayer_audio.dat
+	LINE=1
+	LINE_AID=0
+	LINES=`cat "$WORKDIR"/ffmpeg.dat | wc -l`
+	pref_name="$name"
+	echo
+	echo "Number of VIDEO tracks detected: `cat "$WORKDIR"/ffmpeg.dat | grep Video | wc -l`"
+	echo "Number of AUDIO tracks detected: `cat "$WORKDIR"/ffmpeg.dat | grep Audio | wc -l`"
+	while [ $LINE -le $LINES ]; do
+		line=`sed -n "$LINE"p "$WORKDIR"/ffmpeg.dat`
+		VID=`echo $line | grep Video`
+		AUD=`echo $line | grep Audio`
+		# Video #
+		if [ ! -z "$VID" ]; then
+			VID_ID=`echo $line | awk '{print $2}' | cut -d. -f2 | cut -d: -f1 | sed 's/,//g'`
+			SRC_WIDTH=`echo $line | cut -dx -f1 | awk '{print $NF}'`
+			SRC_HEIGHT=`echo $line | cut -dx -f2 | awk '{print $1}' | cut -d, -f1`
+			SRC_ASPECT=`perl -le "print ( $SRC_WIDTH / $SRC_HEIGHT )"`
+			if [ `cat "$WORKDIR"/ffmpeg.dat | grep Video | wc -l` -gt 1 ]; then
+				name="$pref_name"-v"$VID_ID"
+			fi
+			encode
+		# Audio #
+		# Mplayer used for audio here as FFmpeg does not support all Quicktime Audio formats #
+		elif [ ! -z "$AUD" ]; then
+			AUD_ID=`echo $line | awk '{print $2}' | cut -d. -f2 | cut -d: -f1 | sed 's/,//g'`
+			let LINE_AID=$LINE_AID+1
+			AID=`sed -n "$LINE_AID"p "$WORKDIR"/mplayer_audio.dat`
+			mplayer -vo null -aid $AID -ao pcm:file="$WORKDIR"/"$pref_name"-a"$AUD_ID".pcm -srate 48000 "$file" &> /dev/null &
+			sleep 5s
+			PROC="mplayer -vo"
+			echo ""
+			echo -en "\e[32;01m Running:\e[m mplayer -vo null -aid $AID -ao pcm:file="$WORKDIR"/"$pref_name"-a"$AUD_ID".pcm -srate 48000 "$file"..."
+			spinner
+			good Running: ffmpeg -y -i "$WORKDIR"/"$pref_name"-a"$AUD_ID".pcm -ar 48000 -ab 384 -ac 2 "$WORKDIR"/"$pref_name"-a"$AUD_ID".ac3
+			ffmpeg -y -i "$WORKDIR"/"$pref_name"-a"$AUD_ID".pcm -ar 48000 -ab 384 -ac 2 "$WORKDIR"/"$pref_name"-a"$AUD_ID".ac3
+			rm "$WORKDIR"/"$pref_name"-a"$AUD_ID".pcm
+			audio_convert "$WORKDIR"/"$pref_name"-a"$AUD_ID".ac3
+		fi
+		let LINE=$LINE+1
+	done
+	AUD_FILE=`find "$WORKDIR" -name "$pref_name-a*.*" -exec echo \"{}\" \; | paste -s -d" "`
+	IFS="
+	"
+	for i in `ls "$WORKDIR"/"$pref_name"*.m2v | awk -F"/" '{print $NF}' | sed 's/.\{4\}$//'`; do
+		name="$i"
+		IFS=" "
+		mux
+		subtitles
+	done
+	rm "$WORKDIR"/ffmpeg.dat "$WORKDIR"/mplayer_audio.dat "$WORKDIR"/"$pref_name"-a*.* 2> /dev/null
+}
+
+stream_media_fetch () {
+	if [ ! -z "`file -Lk "$pref_file" | grep ASCII`" ]; then
+		## Loop until we get an ASX or SMIL file ##
+		until [ -z "`head -n1 "$pref_file" | grep "http:"`"  ]; do
+			if [ -z "`tail "$pref_file" | grep "</ASX>"`" ] && [ -z "`tail "$pref_file" | grep "</smil>"`" ]; then
+				pref_file=`head -n1 "$pref_file"`
+				wget -P "$WORKDIR" "$pref_file"
+				pref_file="$WORKDIR"/`echo "$pref_file" | awk -F"/" '{print $NF}'`
+			fi
+		done
+	fi
+}
+
+stream_media_dump () {
+	if [ ! -z "`file -Lk "$pref_file" | grep ASCII`" ] || [ ! -z "`file -Lk "$pref_file" | grep SGML`" ]; then
+		grep -E "mms:|rtsp:" "$pref_file" | sed 's/.*\(mms:.*\)\".*/\1/' | sed 's/.*\(rtsp:.*\)\".*/\1/' | cut -d\" -f1 | uniq -s25 > "$WORKDIR"/stream.dat
+		if [ ! -z "`tail "$pref_file" | grep "</ASX>"`" ]; then
+			grep title "$pref_file" | cut -d\> -f2 | cut -d\< -f1 > "$WORKDIR"/titles.dat
+		elif [ ! -z "`tail "$pref_file" | grep "</smil>"`" ]; then
+			grep rtsp: "$pref_file" | sed 's/.*\(title.*\)\".*/\1/' | cut -d\" -f2 | cut -d\> -f2 | cut -d\< -f1 > "$WORKDIR"/titles.dat
+		fi
+		LINE=1
+		LINES=`cat "$WORKDIR"/stream.dat | wc -l`
+		while [ $LINE -le $LINES ]; do
+			line=`sed -n "$LINE"p "$WORKDIR"/stream.dat`
+			file=`echo $line | awk -F"/" '{print $NF}'`
+			if [ -f "$WORKDIR"/titles.dat ]; then
+				title=`sed -n "$LINE"p "$WORKDIR"/titles.dat`
+				name=`echo "$title" | sed "s/['()]//g"`
+			else
+				name=`echo "$file" | sed 's/.\{4\}$//' | sed "s/['()]//g"`
+			fi
+			mplayer -dumpstream -dumpfile "$WORKDIR"/"$file" "$line" &> /dev/null &
+			sleep 5s
+			PROC="mplayer -dumpstream -dumpfile"
+			echo ""
+			echo -en "\e[32;01m Running:\e[m mplayer -dumpstream -dumpfile "$WORKDIR"/"$file" "$line"..."
+			spinner
+			if [ ! -f "$WORKDIR"/"$file" ]; then
+				errmsg Error: Dumping stream for "$line"
+			else
+				file="$WORKDIR"/"$file"
+				stream_media_encode
+			fi
+			let LINE=$LINE+1
+		done
+		rm "$WORKDIR"/stream.dat $WORKDIR/titles.dat 2> /dev/null
+	else			# Fetched file is not an ASCII file, probably a video file, so encode it
+		file="$pref_file"
+		name=`echo "$file" | awk -F"/" '{print $NF}' | sed "s/['()]//g" | sed 's/.\{4\}$//'`
+		stream_media_encode
+	fi
+}
+
+stream_media_encode () {
+	streaming_media="yes"
+	preformat_skip="yes"
+	file_type
+	input_info
+	dimension_set
+	preformat_check
+	surround_check
+	file_preformat
+	encode
+	audio_convert "$WORKDIR"/"$name".ac3
+	mux
+	subtitles
+}
+
+stream_media () {
+	if [ ! -z "`echo "$file" | grep -E "http:|mms:|rtsp:"`" ]; then
+		if [ ! -z "`echo "$file" | grep "http:"`" ]; then	# Input is a http:// stream or URL
+			wget -P "$WORKDIR" "$file"
+			pref_file="$WORKDIR"/`echo "$file" | awk -F"/" '{print $NF}'`
+			stream_media_fetch
+			stream_media_dump
+		else	# Input is an mms:// rtsp:// stream
+			pref_file=`echo "$file" | awk -F"/" '{print $NF}'`
+			mplayer -dumpstream -dumpfile "$pref_file" "$file" &> /dev/null &
+			sleep 5s
+			PROC="mplayer -dumpstream -dumpfile"
+			echo ""
+			echo -en "\e[32;01m Running:\e[m mplayer -dumpstream -dumpfile "$pref_file" "$file"..."
+			spinner
+			if [ ! -f "$pref_file" ]; then
+				errmsg Error: Dumping stream for "$file"
+				echo "ENCODING ERROR" >> $VAR_DATAFILE
+				exit
+			else
+				file="$pref_file"
+				name=`echo "$file" | sed 's/.\{4\}$//'`
+				stream_media_encode
+			fi
+		fi
+	else	# Input is a single streaming media file
+                pref_file="$file"
+		stream_media_fetch
+		stream_media_dump
+	fi
+}
+
+encode () {
+	ffmpeg_crop
+		FF_WORKDIR=`echo "$WORKDIR" | sed 's/ /\\ /g' | sed "s/['()]//g"`
+		FF_name=`echo "$name" | sed 's/ /\\ /g' | sed "s/['()]//g"`
+	if [ $HAS_SURROUND != "yes" ] && \
+		[ "$file_type" != "multi-format" ] && [ "$file_type" != "Matroska" ] && [ "$file_type" != "OGM video" ] && [ "$file_type" != "DVD Vob" ]; then
+                AUD_ID=`ffmpeg -i "$file" 2>&1 | grep Audio | awk '{print $2}' | cut -d. -f2 | cut -d: -f1 | cut -d[ -f1 | sed 's/,//g'`
+		[ ! -z "$AUD_ID" ] && AUDIO_ARGS="-map 0:"$AUD_ID" -ar 48000 -ab 384 -ac 2 \""$WORKDIR"/"$name".ac3\""
+	else
+		AUDIO_ARGS=""
+	fi
+	if [ "$file_type" != "multi-format" ]; then
+	VID_ID=`ffmpeg -i "$file" 2>&1 | grep Video | awk '{print $2}' | cut -d. -f2 | cut -d: -f1 | cut -d[ -f1 | sed 's/,//g'`
+	fi
+	VIDEO_ARGS="-map 0:"$VID_ID""
+	preview
+	if [ $PREVIEW = "yes" ]; then
+		if [ "$CLIP" -gt 0 2> /dev/null ]; then		# Must pipe through an extra ffmpeg process to correctly convert aspect ratio
+			CMD="ffmpeg -y -i \""$file"\" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -r $FORMAT - 2> /dev/null | ffmpeg -y -i - -b 5000 -bufsize 224 -maxrate 7000 -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T -r $FORMAT -map 0:0 -f mpeg2video \""$FF_WORKDIR"/"$FF_name".m2v\" -map 0:0 $PREVIEW_ARGS"
+			eval $CMD
+			sleep 5s
+			PROC="ffmpeg -y -i"
+			echo ""
+			echo -en "\e[32;01m Running:\e[m ffmpeg -y -i "$file" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -r $FORMAT - 2> /dev/null | ffmpeg -y -i - -b 5000 -bufsize 224 -maxrate 7000 -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T -r $FORMAT -map 0:0 -f mpeg2video "$FF_WORKDIR"/"$FF_name".m2v..."
+			spinner
+		else
+			eval ffmpeg -y -i \""$file"\" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -bufsize 224 -maxrate 7000 -r $FORMAT -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T \""$FF_WORKDIR"/"$FF_name".m2v\" $VIDEO_ARGS $PREVIEW_ARGS
+			sleep 5s
+			PROC="ffmpeg -y -i"
+			echo ""
+			echo -en "\e[32;01m Running:\e[m ffmpeg -y -i "$file" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -bufsize 224 -maxrate 7000 -r $FORMAT -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T "$FF_WORKDIR"/"$FF_name".m2v..."
+			spinner
+		fi
+	else
+		if [ "$CLIP" -gt 0 2> /dev/null ]; then	# Must pipe through an extra ffmpeg process to correctly convert aspect ratio
+			good Running: "ffmpeg -y -i "$file" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -r $FORMAT - 2> /dev/null | ffmpeg -y -i - -b 5000 -bufsize 224 -maxrate 7000 -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T -r $FORMAT -f mpeg2video "$FF_WORKDIR"/"$FF_name".m2v"
+			CMD="ffmpeg -y -i \""$file"\" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -r $FORMAT - 2> /dev/null | ffmpeg -y -i - -b 5000 -bufsize 224 -maxrate 7000 -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T -r $FORMAT -f mpeg2video \""$FF_WORKDIR"/"$FF_name".m2v\""
+			eval $CMD
+		else
+			good Running: "ffmpeg -y -i "$file" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -bufsize 224 -maxrate 7000 -r $FORMAT -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T "$FF_WORKDIR"/"$FF_name".m2v"
+			eval ffmpeg -y -i \""$file"\" $AUDIO_ARGS $VIDEO_ARGS -f mpeg2video -s "$SRC_WIDTH"x"$SRC_HEIGHT" $CROP_ARGS -b 5000 -bufsize 224 -maxrate 7000 -r $FORMAT -s "$WIDTH"x"$HEIGHT" -aspect $ASPECT_T \""$FF_WORKDIR"/"$FF_name".m2v\"
+		fi
+	fi
+	if [ ! -f "$WORKDIR"/"$name".m2v ]; then
+		errmsg Error: Video encoding failed for "$WORKDIR"/"$name".m2v, file not successfully encoded!
+		echo "ENCODING ERROR" >> $VAR_DATAFILE
+		exit
+	fi
+	audioList=( [1]=""$WORKDIR"/"$name".ac3" [2]=""$WORKDIR"/"$name".dts" [3]=""$WORKDIR"/"$name".mp2" [4]=""$WORKDIR"/"$name".lpcm" [5]=""$WORKDIR"/"$name".pcm" )
+	if [ ! -f "${audioList[@]}" 2> /dev/null ] && [ "$file_type" != "Matroska" ] && [ "$file_type" != "OGM video" ] && [ "$file_type" != "multi-format" ]; then
+		warn Warning: audio stream is silent!
+		no_audio
+	fi
+	rm "$menc_file" 2> /dev/null
+	encode_skip=""	# Reset
+}
+
+audio_stereo () {
+	echo -e "\e[33;01m Converting audio stream to 2-channel "$AUD_FORMAT" stereo\e[m"
+	ecasound -d:0 -f:16,2,48000 -i "$WORKDIR"/common-multi.wav -o "$WORKDIR"/common-stereo.wav &
+		sleep 5s
+		PROC="ecasound -d:0"
+		echo
+		echo -en "\e[32;01m Running:\e[m ecasound -d:0 -f:16,2,48000 -i $WORKDIR/common-multi.wav -o $WORKDIR/common-stereo.wav..."
+		spinner
+	## Convert to AC3-Stereo ##
+	if [ "$AUD_FMT" = ac3 ]; then
+		AUD_FILE="$AUD_FILE".ac3
+		good Running: "ffmpeg -y -i $WORKDIR/common-stereo.wav -ar 48000 -ab 384 -ac 2 $AUD_FILE"
+		ffmpeg -y -i "$WORKDIR"/common-stereo.wav -ar 48000 -ab 384 -ac 2 "$AUD_FILE"
+		if [ ! -f "$AUD_FILE" 2> /dev/null ]; then
+			errmsg Error: Audio AC3-Stereo encoding failed for $AUD_FILE, file not successfully encoded!
+			break
+		fi
+	## Convert to MP2-Stereo ##
+	elif [ "$AUD_FMT" = mp2 ]; then
+		AUD_FILE="$AUD_FILE".mp2
+		good Running: "ffmpeg -y -i $WORKDIR/common-stereo.wav -ar 48000 -ab 384 -ac 2 $AUD_FILE"
+		ffmpeg -y -i "$WORKDIR"/common-stereo.wav -ar 48000 -ab 384 -ac 2 "$AUD_FILE"
+		if [ ! -f "$AUD_FILE" 2> /dev/null ]; then
+			errmsg Error: Audio MP2 encoding failed for $AUD_FILE, file not successfully encoded!
+			break
+		fi
+	## Convert to PCM-Stereo (16-bit) ##
+	elif [ "$AUD_FMT" = pcm16 ]; then
+		AUD_FILE="$AUD_FILE".lpcm
+		good Running: "sndfile-convert -pcm16 $WORKDIR/common-stereo.wav $WORKDIR/pcm16.wav"
+		sndfile-convert -pcm16 $WORKDIR/common-stereo.wav "$WORKDIR"/pcm16.wav
+		good Running: "wav2lpcm $WORKDIR/pcm16.wav > $AUD_FILE"
+		wav2lpcm "$WORKDIR"/pcm16.wav > "$AUD_FILE"
+		rm "$WORKDIR"/pcm16.wav
+		if [ ! -f "$AUD_FILE" 2> /dev/null ]; then
+			errmsg Error: Audio PCM-16bit encoding failed for $AUD_FILE, file not successfully encoded!
+			break
+		fi
+	## Convert to PCM-Stereo (24-bit) ##
+	elif [ "$AUD_FMT" = pcm24 ]; then
+		AUD_FILE="$AUD_FILE".lpcm
+		good Running: "sndfile-convert -pcm24 $WORKDIR/common-stereo.wav $WORKDIR/pcm24.wav"
+		sndfile-convert -pcm24 "$WORKDIR"/common-stereo.wav "$WORKDIR"/pcm24.wav
+		good Running: "wav2lpcm $WORKDIR/pcm24.wav > $AUD_FILE"
+		wav2lpcm "$WORKDIR"/pcm24.wav > "$AUD_FILE" 2> /dev/null
+		rm pcm24.wav
+		if [ ! -f "$WORKDIR"/"$AUD_FILE" 2> /dev/null ]; then
+			errmsg Error: Audio PCM-24bit encoding failed for $AUD_FILE, file not successfully encoded!
+			break
+		fi
+	fi
+	rm "$WORKDIR"/common-multi.wav "$WORKDIR"/common-stereo.wav 2> /dev/null
+}
+
+audio_surround () {
+	echo ""
+	echo -e "\e[33;01m Converting audio stream to 5.1-channel $AUD_FORMAT\e[m"
+	echo ""
+	CHANS=`sndfile-info "$WORKDIR"/common-multi.wav | grep Channels | tail -n1 | awk '{print $NF}'`
+	if [ "$CHANS" -lt 6 ]; then
+		echo ""
+		echo -e "\e[33;01m Extracting left/right channels...\e[m"
+		ecasound -d:0 -a:1,2 -i "$WORKDIR"/common-multi.wav -a:1 -f:16,1,48000 -o "$WORKDIR"/left.wav -a:2 -f:16,1,48000 -o "$WORKDIR"/right.wav -erc:2,1 &
+		sleep 5s
+		PROC="ecasound -d:0 -a:1,2"
+		echo ""
+		echo -en "\e[32;01m Running:\e[m ecasound -d:0 -a:1,2 -i $WORKDIR/common-multi.wav -a:1 -f:16,1,48000 -o $WORKDIR/left.wav -a:2 -f:16,1,48000 -o $WORKDIR/right.wav -erc:2,1..."
+		spinner
+		echo ""
+		echo -e "\e[33;01m Creating left/right rear surround channels\e[m"
+		echo ""
+		cp "$WORKDIR"/left.wav "$WORKDIR"/left_surround.wav
+		cp "$WORKDIR"/right.wav "$WORKDIR"/right_surround.wav
+		echo ""
+		echo -e "\e[33;01m Creating centre surround channel\e[m"
+		ecasound -d:0 -f:16,1 -i "$WORKDIR"/common-multi.wav -o "$WORKDIR"/centre.wav &
+		sleep 5s
+		PROC="ecasound -d:0 -f:16,1"
+		echo ""
+		echo -en "\e[32;01m Running:\e[m ecasound -d:0 -f:16,1 -i $WORKDIR/common-multi.wav -o $WORKDIR/centre.wav..."
+		spinner
+		echo ""
+		echo -e "\e[33;01m Creating low frequency effect(LFE-sub) surround channel\e[m"
+		ecasound -d:0 -f:16,1 -i "$WORKDIR"/centre.wav -efl:100 -o "$WORKDIR"/lfe.wav &
+		sleep 5s
+		PROC="ecasound -d:0 -f:16,1"
+		echo ""
+		echo -en "\e[32;01m Running:\e[m ecasound -d:0 -f:16,1 -i $WORKDIR/centre.wav -efl:100 -o $WORKDIR/lfe.wav..."
+		spinner
+		multimux "$WORKDIR"/left.wav "$WORKDIR"/centre.wav "$WORKDIR"/right.wav "$WORKDIR"/left_surround.wav "$WORKDIR"/right_surround.wav "$WORKDIR"/lfe.wav -o "$WORKDIR"/common-multi.wav &> /dev/null &
+		sleep 5s
+		PROC="multimux"
+		echo ""
+		echo -en "\e[32;01m Running:\e[m multimux $WORKDIR/left.wav $WORKDIR/centre.wav $WORKDIR/right.wav $WORKDIR/left_surround.wav $WORKDIR/right_surround.wav $WORKDIR/lfe.wav -o $WORKDIR/common-multi.wav..."
+		spinner
+		rm "$WORKDIR"/left.wav "$WORKDIR"/centre.wav "$WORKDIR"/right.wav "$WORKDIR"/left_surround.wav "$WORKDIR"/right_surround.wav "$WORKDIR"/lfe.wav
+	fi
+	## Convert to AC3-5.1 ##
+	good Running: "ffmpeg -y -i $WORKDIR/common-multi.wav -ar 48000 -ab 384 -ac 6 $AUD_FILE"
+	ffmpeg -y -i "$WORKDIR"/common-multi.wav -ar 48000 -ab 384 -ac 6 "$AUD_FILE"
+	rm "$WORKDIR"/common-multi.wav
+	if [ ! -f "$AUD_FILE" 2> /dev/null ]; then
+		errmsg Error: Audio AC3-5.1 encoding failed for $AUD_FILE, file not successfully encoded!
+		exit
+	fi
+}
+
+audio_convert () {
+	AUD_FILE=`echo $1 | sed 's/.\{4\}$//'`
+	if [ "$HAS_DTS" = "yes" ]; then
+		TOOLKIT=([1]=dtsdec)
+		TOOLURL=([1]=http://www.videolan.org/dtsdec.html)
+		check_tools
+		good Running: "dtsdec -o wav6 `echo $1 | sed 's/\"//g'` > $WORKDIR/dts-ac3.wav"
+		IFS="
+		"
+			eval dtsdec -o wav6 \"$1\" > $WORKDIR/dts-ac3.wav 2> /dev/null
+		IFS=" "
+	elif [ "$AUD_FMT" = "ac3" ] && [ "$SURROUND" = "no" ] && [ "$HAS_SURROUND" = "no" ]; then
+		AUD_FILE=\""$AUD_FILE".ac3\"
+		return # Send encoded stereo AC3 to mplex
+	elif [ "$AUD_FMT" = "ac3" ] && [ "$SURROUND" = "yes" ] && [ "$HAS_SURROUND" = "yes" ]; then
+		AUD_FILE=\""$AUD_FILE".ac3\"
+		return # Send tcextracted 5.1 AC3 to mplex
+	else
+		eval a52dec -o wav \"$1\" echo > $WORKDIR/dts-ac3.wav 2> /dev/null &
+		sleep 5s
+		PROC="a52dec -o wav"
+		echo ""
+		echo -en "\e[32;01m Running:\e[m a52dec -o wav $1 > $WORKDIR/dts-ac3.wav..."
+		spinner
+	fi
+
+	sndfile-convert -pcm16 "$WORKDIR"/dts-ac3.wav "$WORKDIR"/common-multi.wav &
+	sleep 5s
+	PROC="sndfile-convert -pcm16"
+	echo ""
+	echo -en "\e[32;01m Running:\e[m sndfile-convert -pcm16 $WORKDIR/dts-ac3.wav $WORKDIR/common-multi.wav..."
+	spinner
+	rm "$WORKDIR"/"$1" "$WORKDIR"/dts-ac3.wav 2> /dev/null
+	if [ "$AUD_FMT" != ac3 ] || [ "$SURROUND" = no ]; then
+		audio_stereo
+	else
+		AUD_FILE="$AUD_FILE".ac3
+		audio_surround
+	fi
+	AUD_FILE=\""$AUD_FILE"\"
+}
+
+mux () {
+	good Running: "mplex -f8 $PCM_ARGS -o $WORKDIR/$name.VOB $WORKDIR/$name.m2v `echo $AUD_FILE | sed 's/\"//g'`"
+	eval mplex -f8 $PCM_ARGS -o \""$WORKDIR"/"$name".VOB\" \""$WORKDIR"/"$name".m2v\" "$AUD_FILE"
+	if [ "$file_type" != "multi-format" ] || [ "$file_type" != "OGM video" ]; then
+		rm "$WORKDIR"/"$name".m2v "$AUD_FILE" 2> /dev/null
+	fi
+	if [ ! -f "$WORKDIR"/"$name".VOB 2> /dev/null ]; then
+		errmsg Error: Muxing failed, file not successfully encoded!
+		echo "ENCODING ERROR" >> $VAR_DATAFILE
+		exit
+	fi
+	HAS_SURROUND="no"	# Reset
+	HAS_DTS="no"		# Reset
+}
+
+subfont () {
+	for i in `cat /etc/X11/fs/config | grep -E "TTF|TrueType|truetype" | grep / | awk -F"," '{for(i=1;i<=NF;i++) print $i}' | \
+		        cut -d= -f2 | awk '{print $1}' | grep -E "TTF|TrueType|truetype"`; do
+			j=$i/"$SUBFONT"
+			if [ -f "$j" ]; then
+				SUBFONT_PATH=$j;
+				break;
+			fi
+		done
+		if [ ! -f ~/.spumux/"$SUBFONT" ] && \
+			[ ! -f "$SUBFONT_PATH" ]; then
+			errmsg Error: fontname '$SUBFONT' not found
+			break
+		fi
+		return 0
+	}
+
+vob_sub () {
+	TOOLKIT=([1]=spumux)
+	TOOLURL=([1]=http://sourceforge.net/projects/dvdauthor/)
+	check_tools
+	curr_dir=`pwd`
+	cd "$WORKDIR"
+	if [ "$VOBSUBS" = "yes" ]; then
+		SUB_ID=0
+		while [ $SUB_ID -lt $SUB_NUM ]; do
+			spumux -s$SUB_ID vobsub_$SUB_ID.xml < "$name".VOB > "$name"_final.VOB
+			mv "$name"_final.VOB "$name".VOB
+			let SUB_ID=$SUB_ID+1
+		done
+	fi
+	cd "$curr_dir"
+}
+
+subtitles () {
+	TOOLKIT=([1]=spumux)
+	TOOLURL=([1]=http://sourceforge.net/projects/dvdauthor/)
+	check_tools
+	if [ ! -z "$SUBS" ]; then
+		if [ ! -d ~/.spumux ]; then
+			mkdir ~/.spumux
+		fi
+		if [ ! -f ~/.spumux/$SUBFONT ]; then
+			cp $SUBFONT_PATH ~/.spumux/
+		fi
+		if [ ! -z "$EXTSUB" ]; then
+			for i in $subs_file_list; do
+					var="\$subs_file_$i";
+					eval "subtitle=\"$var\"";
+					echo "$subtitle" >> "$WORKDIR"/subs_list.dat
+			done
+		else
+			echo "$SUBS" >> "$WORKDIR"/subs_list.dat
+		fi
+                SUB_ID=0
+		let TV_HEIGHT=$TV_HEIGHT-10
+		LINE=1
+		LINES=`cat "$WORKDIR"/subs_list.dat | wc -l`
+		while [ $LINE -le $LINES ]; do
+			subtitle=`sed -n "$LINE"p "$WORKDIR"/subs_list.dat`
+cat <<EOF> "$WORKDIR"/subtitle.xml
+<subpictures>
+ <stream>
+   <textsub filename="$subtitle" characterset="$SUBCHARACTERSET"
+    fontsize="$SUBFONTSIZE" font="$SUBFONT" horizontal-alignment="center"
+    vertical-alignment="bottom" left-margin="60" right-margin="60"
+    top-margin="10" bottom-margin="10" subtitle-fps="$FPS"
+    movie-fps="$FPS" movie-width="$TV_WIDTH" movie-height="$TV_HEIGHT" />
+ </stream>
+</subpictures>
+EOF
+			if [ "$SKIP_VOB" = "yes" ]; then
+				cp "$file" "$WORKDIR"/"$file_nopath"
+			fi			
+			echo ""
+			echo -en "\e[32;01m Creating subtitle track "$subtitle"\e[m"
+			echo ""
+			good Running: "spumux -s$SUB_ID $WORKDIR/subtitle.xml < "$WORKDIR"/"$name".VOB > "$WORKDIR"/"$name"_final.VOB"
+			spumux -s$SUB_ID "$WORKDIR"/subtitle.xml < "$WORKDIR"/"$name".VOB > "$WORKDIR"/"$name"_final.VOB
+			mv "$WORKDIR"/"$name"_final.VOB "$WORKDIR"/"$name".VOB
+			let SUB_ID=$SUB_ID+1
+			let LINE=$LINE+1
+		done
+	fi
+	rm "$WORKDIR"/subtitle.xml "$WORKDIR"/subs_list.dat 2> /dev/null
+	SUBS=""
+	EXTSUB=""
+        if [ -f "$WORKDIR"/"$name".VOB 2> /dev/null ]; then
+		echo "$WORKDIR/$name.VOB" >> $VAR_DATAFILE
+		good Success: "New file is $WORKDIR/$name.VOB"
+	fi	
+	return
+}
+
+main () {
+	check_tools
+	echo "Any2Vob-0.30"
+	echo ""
+	echo "Use Ctrl+C to abort"
+	echo ""
+	echo "File(s) to process: "$input_files""
+	echo ""
+	if [ ! -z "$SUBS" ]; then
+		subfont
+		echo "Subtitle file(s) to merge: $SUBS"
+		echo "Font-type: $SUBFONT_PATH"
+		echo "Font-size: $SUBFONTSIZE"
+		echo ""
+	fi
+	if [ "$CALC" = "yes" ]; then
+		for i in $input_file_list; do
+			var="\$input_file_$i";
+			eval "file=\"$var\"";
+			file_type
+			if [ "$file_type" != "Streaming Media" ]; then
+				if [ ! -f "$file" ]; then
+					errmsg Error: $file does not exist
+					exit
+				fi
+			fi
+			bitrate_calc
+			TOTAL_SIZEMB=`perl -le "print ( $TOTAL_SIZEMB + $FILE_SIZEMB + 300 )"`
+		done
+		TOTAL_SIZEGB=`perl -le "printf ( '%.2f', $TOTAL_SIZEMB / 1024 )"`
+		if [ "$TOTAL_SIZEMB" -lt 1024 ]; then
+			echo
+			echo -e "\e[33;01m Total estimated DVD Disc usage is:  "$TOTAL_SIZEMB" MB\e[m"
+			echo
+		else
+			echo
+			echo -e "\e[33;01m Total estimated DVD Disc usage is:  "$TOTAL_SIZEGB" GB\e[m"
+			echo
+		fi
+			exit
+	fi
+	total_diskspace
+	for i in $input_file_list; do
+		var="\$input_file_$i";
+			eval "file=\"$var\"";
+			file_type
+			if [ "$file_type" != "Streaming Media" ]; then
+				if [ ! -f "$file" ]; then
+					errmsg Error: $file does not exist
+					break
+				fi
+			fi
+			echo -e "\e[33;01m<<<< NEW ENCODING of "$file" started at `date` >>>>\e[m"
+		# $file = full directory path & filename
+		# $file_nopath = filename only with directory path stripped
+		# $name = filename only with extension stripped
+			file_nopath=`echo "$file" | awk -F"/" '{print $NF}'`
+			name=`echo "$file" | awk -F"/" '{print $NF}' | sed "s/['()]//g" | sed 's/.\{4\}$//'`
+			file_type
+			echo ""
+			echo "File "$file" is of type: "$file_type""
+			echo ""
+			if [ "$file_type" != "Streaming Media" ]; then
+				input_info
+				echo ""
+				echo "Frames/sec:	"$SRC_FPS""
+				echo "Resolution:	"$SRC_WIDTH"x"$SRC_HEIGHT""
+				echo "Aspect:		"$SRC_ASPECT":1"
+				bitrate_calc
+				if [ "$FILE_SIZEMB" -lt 1024 ]; then
+					echo
+		        		echo -e "\e[33;01m Final estimated filesize:  "$FILE_SIZEMB" MB\e[m"
+				else
+					echo
+					echo -e "\e[33;01m Final estimated filesize:	"$FILE_SIZEGB" GB\e[m"
+				fi
+			fi
+			dimension_set
+			preformat_check
+		if [ "$SKIP_VOB" != "yes" ]; then
+			if [ "$file_type" != "Raw DV Video" ] && \
+				[ "$file_type" != "MPEG Transport Stream" ] && \
+				[ "$file_type" != "multi-format" ] && \
+				[ "$file_type" != "Matroska" ] && \
+				[ "$preformat_skip" != "yes" ]; then
+				echo
+				surround_check
+			fi
+			if [ "$file_type" != "MythTV Nuppelvideo" ] && \
+				[ "$file_type" != "OGM video" ] && \
+				[ "$file_type" != "Raw DV Video" ] && \
+				[ "$file_type" != "MPEG Transport Stream" ] && \
+				[ "$file_type" != "multi-format" ] && \
+				[ "$file_type" != "Matroska" ] && \
+				[ "$preformat_skip" != "yes" ]; then
+					file_preformat
+					if [ "$encode_skip" != "yes" ]; then
+						encode
+					fi
+			fi
+			if [ "$file_type" != "Matroska" ] && \
+				[ "$file_type" != "OGM video" ] && \
+				[ "$file_type" != "MPEG Transport Stream" ] && \
+				[ "$file_type" != "multi-format" ] && \
+				[ "$file_type" != "DVD Vob" ] && \
+				[ "$preformat_skip" != yes ] && \
+				[ "$HAS_DTS" = no ] && \
+				[ "$AUDIO" != "no" ]; then
+					audio_convert "$WORKDIR"/"$name".ac3
+					echo
+			fi
+			if [ "$file_type" != "Matroska" ] && \
+				[ "$file_type" != "OGM video" ] && \
+				[ "$file_type" != "MPEG Transport Stream" ] && \
+				[ "$file_type" != "multi-format" ] && \
+				[ "$preformat_skip" != "yes" ]; then
+					mux
+					echo
+			fi
+			if [ "$file_type" = "DVD Vob" ]; then
+				vob_sub
+			fi
+		fi
+		if [ "$file_type" != "Matroska" ] && \
+			[ "$file_type" != "OGM video" ] && \
+			[ "$file_type" != "MPEG Transport Stream" ] && \
+			[ "$file_type" != "multi-format" ] && \
+			[ "$streaming_media" != "yes" ]; then
+				subtitles
+		fi
+		SKIP_VOB=""		# Reset
+		streaming_media=""	# Reset
+	done
+	      }
+
+	if [ "$LOG" = "yes" ]; then
+		echo "" > "$LOGFILE"
+		main 2>&1 | tee -a "$LOGFILE"
+	else
+		main
+	fi
+	exit 0
+
+#!/usr/bin/perl -w
+ sub nuvinfo {
+ my $file = shift;
+ my(%info, $buffer);
+ open(DATA, $file);
+ read(DATA, $buffer, 72);
+	($info{'finfo'},
+	$info{'version'},
+	$info{'width'},
+	$info{'height'},
+	$info{'desiredheight'},
+	$info{'desiredwidth'},
+	$info{'pimode'},
+	$info{'aspect'},
+	$info{'fps'},
+	       ) = unpack('Z12 Z5 xxx i i i i a xxx d d i i i i', $buffer);
+	return %info; }
+ my $file = $ARGV[0];
+ my %info = nuvinfo($file);
+ print "Width:  $info{'width'}\n";
+ print "Height: $info{'height'}\n";
+ print "FPS:    $info{'fps'}\n";

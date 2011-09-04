@@ -1,0 +1,1 @@
+mplayer -tv driver=v4l2:norm=NTSC:chanlist=us-cable:width=640:height=480 tv://$1

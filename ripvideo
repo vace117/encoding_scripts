@@ -1,0 +1,164 @@
+#!/bin/ksh
+# Rips a DVD or encodes a file
+
+
+####################### User defined parameters ######################
+
+# If you are ripping a DVD, specify the track number here
+# If you are encoding a file, just specify the file name on the
+# command line and the value below will be ignored
+TRACK="2"
+
+# Output file name 
+OUTPUT=movie.avi
+
+VBITRATE="800"	# Fill this in
+
+# Check if this is required by encoding a small portion of the file 
+# and open the result in avidemux2 (b/c mplayer will read the aspect 
+# info from avi header, which no other players can do)
+#SCALE="640:480"
+
+# If you want to cut off black bars, fill this in (always calclulate this with -vf cropdetect)
+CROP="704:448:8:14"
+
+# Which pass to start from. This is useful if a pass has failed and you 
+# don't want to restart from scratch
+PASS_TO_START=1	
+######################################################################
+
+############ Prepare command line based on user input ###############
+
+# Determine the input
+if [[ -n $1 ]] ; then 
+  unset TRACK
+fi
+if [[ -z $TRACK ]] ; then
+ INPUT=$1
+else
+ INPUT="dvd://${TRACK}"
+fi
+
+# Determine if we need cropping
+if [[ -n $CROP ]] ; then
+  if [[ -z $FILTERS ]] ; then
+    FILTERS="-vf "
+  fi
+  FILTERS="${FILTERS}crop=${CROP}"
+fi
+
+# Determine if we need scaling
+if [[ -n $SCALE ]] ; then
+  if [[ -z $FILTERS ]] ; then
+    FILTERS="-vf "
+  else
+    FILTERS="$FILTERS,"
+  fi
+  FILTERS="${FILTERS}scale=${SCALE} -zoom " 
+fi
+####################################################################
+
+# Contruct the common portion used in passes 2 and 3 for video
+COMMON_VIDEO="$INPUT $FILTERS \
+-oac copy \
+-ovc lavc \
+-lavcopts vcodec=mpeg4:vhq:vbitrate=$VBITRATE"
+
+echo "Here is the common info for both video passes. Is this ok? (y/[n])"
+echo $COMMON_VIDEO
+read ANSWER
+if [[ $ANSWER != "y" ]] ; then
+  echo "You chose not to continue."
+  exit -1;
+fi
+
+# Start the encoding
+if [ $PASS_TO_START -le 1 ]; then 
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "Starting PASS 1 (ripping audio)..."
+rm frameno.avi
+rm pass1.log
+mencoder $1 \
+-oac mp3lame \
+-lameopts br=96:cbr:vol=6 \
+-ovc frameno \
+-o frameno.avi
+
+echo "Pass 1 complete" > pass1.log
+fi
+
+if [ $PASS_TO_START -le 2 ]; then 
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "Starting PASS 2 (ripping video and creating video log file)...."
+rm pass2.log
+rm divx2pass.log
+mencoder $COMMON_VIDEO:vpass=1 -o $OUTPUT
+
+echo "Pass 2 complete" > pass2.log
+fi
+
+if [ $PASS_TO_START -le 3 ]; then 
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "*********"
+echo "Starting PASS 3 (ripping video again using the video log file)...."
+rm pass 3.log
+mencoder $COMMON_VIDEO:vpass=2 -o $OUTPUT
+
+echo "Pass 3 complete" > pass3.log
+fi
+
+#echo "Starting PASS 2 (ripping video and creating video log file)...."
+#mencoder dvd://$TRACK \
+#-sws 2 \
+#-ovc lavc \
+#-lavcopts vcodec=mpeg4:vhq:vbitrate=$VBITRATE:vpass=1 \
+#-vf scale=$SCALE \
+#-oac copy \
+#-o movie.avi
+#
+#echo "Starting PASS 3 (ripping video again using the video log file)...."
+#mencoder dvd://$TRACK \
+#-sws 2 \
+#-ovc lavc \
+#-lavcopts vcodec=mpeg4:vhq:vbitrate=$VBITRATE:vpass=2 \
+#-vf scale=$SCALE \
+#-oac copy \
+#-o movie.avi
+
+#################### Explanation #########################
+#################### Pass 1 ####################
+# This is the audio only pass
+#mencoder -dvd 1 \ # DVD Track number
+#-oac mp3lame \ # Output Audio Codec: mp3lame
+#-lameopts br=96:cbr:vol=6 \ # Bitrate=96kb/s:Constant_Bitrate:Volume=6 [Increase volume, range from -10 to 10]
+#-ovc frameno \ # No video here. i.e. we only want the audio. frameno is audio only standard
+#-o frameno.avi # Mencoder recognizes this file in the next 2 steps
+
+################## Passes 2 and 3 ###############
+# Passes 2 and 3 are very similar except for 1 parameter: vpass
+# Here is the explanation of what the switches mean
+#
+#mencoder -dvd 1 \ # DVD Track number
+#-sws 2 \ # Scaling_Method 2: bicubic scaling [best quality]
+#-ovc lavc \ # Output Video Codec: libavcodec [here we state to use libavcodec]
+#-lavcopts vcodec=mpeg4:vhq:vbitrate=629:vpass=1 \ # Mpeg4 [a.k.a. DivX]:Very_High_Quality:Video_Bitrate=629:
+#                                                  # Video_Pass=1 [first video rip]
+#-vop scale=704:304,crop=720:360:0:58 \ # Always use 704:304 for 16:9 videos, always calculate the crop values
+#-oac copy \ # Copy audio from the 1st pass
+#-o movie.avi # Output file name
+

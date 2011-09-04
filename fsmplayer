@@ -1,0 +1,978 @@
+#!/bin/bash
+
+# (C) Copyright 2006 Daniel Manjarres
+# only emails with subjects that start with fsmp will get through my anti-spam
+# com.gmail@danmanj2 (you can figure it out)
+
+# LICENSE: after  July 31 2006: plain old GPL v2 or later
+# 	   before July 31 2006: just like GPL v2, except if this fails for a file
+# 	please send me a description of the file and failure, and if you have a patch
+# 	to the paramaters send me that too. If it is legal to send me the first 200 seconds
+#	of the file (and it is not porn) please do that too. The file
+#	/tmp/fsmp.last/t.avi would also be helpful.
+#	I will need the output of "mplayer -V" and the complete output of this script.
+#	However, if this script fails because of a bug in mplayer
+#	(ex: incorrect movie aspect ratio detection) don't bother me.
+
+# fsmp: a program to de-letterbox a movie file, regardless of the color of the
+# letterbox bars or the aspect ratio, and re-letterbox the playback to fit the _current_
+# monitor resolution (instead of the "desktop" resolution, which doesn't work for people using xinerama
+# or needing to use ctrl-alt +/- because of visual impairment) leaving you with no other windows
+# left visible to distract you. The advanced letterbox detection algorithm will even chop
+# off annoing station ID logos or titles that happen to be situated outside of the real
+# video region. tested with "MPlayer dev-CVS--4.0.3" and "MPlayer 1.0pre8-4.1.2"
+
+# originlly written because of 16:9 movie files that are letterboxed 4:3 with white bars
+# instead of black, that have 10 second intros at 4:3 that I don't want to see anyway,
+# and bugs in mplayer when trying to use the vidmode switching leaving
+# me with a crashed mplayer and the wrong resolution on my widescreen monitor.
+
+# depends on dc, imagemagick, mplayer, mencoder, xvidtune
+
+# mplayer sometimes crashes randomly during normal operation, due to bad files or bad
+# karma, so even if all the invocations of mplayer used for detection crash, the script
+# will still play the damn file despite seeming to blow up your terminal.
+
+# if you have a ~/.mplayer/config file it may interfere with this script, maybe
+
+# Usage:
+# for video files:
+# $1 must be the name of a single movie to play, $2 and so on can be options to mplayer
+
+# for dvd's or dvd iso images:
+# $1 can be dvd://title, $2 and so on can be options to mplayer
+# or
+# $1 can be "-dvd-device", and $2 must be the device_file/iso_file, and $3 must be dvd://title
+# while $4  and so on can be options to mplayer
+
+#debug=1 # this will play back the detection frames before the movie
+
+# number of diff jobs to try and run @ same time
+num_cpus=$(( $(cat /proc/cpuinfo |grep processor|tail -1| (read a b c; echo $c)) + 2))
+
+# if orthodox is set the final call to mplayer uses "average joe" settings instead of
+# fully custom settings. This is incompatible with "stretch".
+orthodox=0
+#orthodox=1
+
+# change $remove to somthing other than rm to keep the temporary files for debugging
+remove=rm
+#remove="echo not removing"
+remove=false
+
+# when mplayer fails to detect fps, we just assume a sane value
+assume_fps=30
+
+# if scoftcrop is set the script will expand the crop area to the aspect ratio
+# of the monitor, showing more context (likely just black bars, but potentially
+# some subtitles or station id)
+softcrop=0
+softcrop=1
+
+# if recenter is set the script will allow the softcrop expansion to move the center
+# of the crop region in order to show as much of the original movie outside the
+# detected active region as possible, while keeping the detected crop region visible.
+# If recenterv is set to down, the crop region will grow downward as much as possible
+# in order to make subtitles that appear below the video visible.
+# Only does something if softcrop is on.
+recenter=0	# don't recenter
+recenter=1	# recenter symetrically
+recenterv=up
+recenterv=down
+recenterh=right
+recenterh=left
+
+# if stretch is set the cropped movie is resized to fill the screen even if the aspect
+# ratio may not match. This is not the same as changing the crop area, and produces
+# different results even if softcrop and recenter are also on, if the crop region
+# cannot expand to reach the aspect ratio because there are no pixels left to expand
+# over, but if the softcrop completely succeeds (rare) this does nothing.
+
+stretch=0
+#stretch=1
+
+# suffix uses a different tempdir for each invocation, to keep them from screwing each other up
+# turn off suffix for debugging, turn on if you want to watch movies simultaneously
+suffix=".$$"
+#suffix=""
+
+# on some DVD vob files, HERO for example, the video format is reset a few seconds into playback.
+# on HERO this happens before frame 31, while the screen is still black. Even though the video
+# size is actually set to the exact same value, mplayer destroys and recreates the window and
+# somehow the resolution of the screen gets changed to full desktop size (maybe this is caused by
+# enlightenment's handling of its zoom feature, but I doubt it). This doesn't have any effect
+# when playing back with -fs set, as when orthodox = 1. So to avoid this when playing a dvd file
+# in unorthodox mode we skip $skip_vr seconds into to file at the begining of playback
+
+skip_vr=1 # skip 1 second if a video reconfig is detected
+skip_vr_frames=55 # frames to scan for video change, needs to be longer for -o null
+
+function non_square_compat ()
+{
+	#looking for lines like: monitoraspect=16:10
+	cat /etc/mplayer/mplayer.conf ~/.mplayer/config 2>&1 | grep monitoraspect > /tmp/fsmp${suffix}/monitor
+	cat /tmp/fsmp${suffix}/monitor | cut -f1 -d\# > /tmp/fsmp${suffix}/monitor.1
+	grep monitoraspect /tmp/fsmp${suffix}/monitor.1 | tail -1  > /tmp/fsmp${suffix}/monitor.2
+	cat /tmp/fsmp${suffix}/monitor.2 | cut -f2 -d= > /tmp/fsmp${suffix}/monitor.3
+	aspectopt=$(cat /tmp/fsmp${suffix}/monitor.3 | (read a b; echo $a))
+
+	if [ "$aspectopt" == "" ]
+	then
+		sa=$ra		#assume square like me
+		#sa=1.333	#assume 4:3 like mplayer
+	elif ( echo $aspectopt | grep : &> /dev/null)
+	then
+		ax=$(echo $aspectopt | tr : " " | (read  ax ay crap2; echo $ax))
+		ay=$(echo $aspectopt | tr : " " |  (read  ax ay crap2; echo $ay))
+		sa=$(echo 5 k $ax $ay / p | dc)
+	else
+		sa=$aspectopt
+	fi
+
+	mpa=$(echo 5 k $sa $ra / p | dc)
+	echo monitor aspect ratio detected as $sa
+	echo monitor pixel aspect ratio detected as $mpa
+}
+
+function detect_vr ()
+{
+	if [ "$dvd" != "1" ] && ! (echo $filename | grep .vob\$ &> /dev/null)
+	then
+		echo "not a dvd vob"
+		skip_vr=0
+		return
+	fi
+
+	echo this looks like a dvd vob, testing to see if it makes mplayer hiccup
+	echo by switching to progressive scan
+	cd /tmp/fsmp${suffix}
+	time lines=$(mplayer -noconsolecontrols $dvd_dev1 $dvd_dev2 -fps 400 -vo md5sum -ao null -frames $skip_vr_frames "$1" 2>&1 | grep -i "request" | wc -l  )
+	$remove md5sums
+
+	if [ $lines -lt "3" ]
+	then
+		echo "No, this file doesn't switch video configs"
+		skip_vr=0
+	else
+		echo "Yep, this file switches video configs, going to skip first few seconds"
+	fi
+	cd - &> /dev/null
+}
+
+function crop_adjust ()
+{
+	cropparam=$1
+
+	vx=$(echo $cropparam | cut -d= -f2 | cut -d: -f1)
+	vy=$(echo $cropparam | cut -d= -f2 | cut -d: -f2)
+	vxo=$(echo $cropparam | cut -d= -f2 | cut -d: -f3)
+	vyo=$(echo $cropparam | cut -d= -f2 | cut -d: -f4)
+	echo visible x=$vx, visible y=$vy, x origin=$vxo y origin=$vyo
+
+	if [ -z "$vx" ] || [ -z "$vy" ] || [ "$vx" -le 0 ] || [ "$vy" -le 0 ] 
+	then
+		# something went wrong, abort croping
+		cropparam=$default_cropparam
+		echo using default cropparam $cropparam
+		vx=$mx
+		vy=$my
+		vxo=0
+		vyo=0
+	fi
+
+	## work around mplayer cropdetect bug for files with odd heights/widths
+	if [ $((vy+vyo)) -gt $((my)) ]
+	then
+		# So the mplayer gods think that everything has to be divisble by 2, since thats
+		# how it has to be for transcoding, but hey, we are PLAYING. There is no crop
+		# limit on playback. So we don't even bother to check that this is a blessed
+		# even number
+		vy=$((vy - (vy+vyo-my)))
+	fi
+	if [ $((vx+vxo)) -gt $((mx)) ]
+	then
+		vx=$((vx - (vx+vxo-mx)))
+	fi
+
+	pa=$(echo 5 k $my $mx / $ma \* p |dc)
+	# round pa to 2 sigfig
+	pa=$(echo 2 k $pa 0.005 + 2 \* 2 / p|dc)
+	echo movie pixel aspect = $pa
+
+	#calculate the aspect ratio of the visible region (the letterbox)
+	va=$(echo 5 k $vx $vy / $pa \* p | dc)
+	# round va to 2 decimal places
+	va=$(echo 2 k $va 0.005 + 2 \* 2 / p|dc)
+	echo visible aspect = $va
+
+	#if visible aspect ratio < screen aspect ratio
+	sign=$(echo $va $sa - p | dc | cut -c1)
+	if [ "$sign" = "-" ]
+	then
+		#limiting dimension is screen height
+		# expand crop area in x direction
+		echo fitting to screen height
+		y=$sy
+		x=$(echo $sy $va \* p |dc | cut -f1 -d.)
+
+		# non-square pixel correction:
+		x=$(echo $sy $va \* $mpa / p |dc | cut -f1 -d.)
+
+		xscale=$(echo 5 k $x $vx / p | dc)
+		buf=$(echo $sx $x - $xscale / p| dc)
+		buf2=$buf
+		echo xscale=$xscale
+		echo buf=$buf
+
+		leftcrop=$vxo
+		rightcrop=$((mx - vx - vxo))
+
+		if [ $buf2 -gt $((leftcrop+rightcrop)) ]
+		then
+			#show the whole damn picture, the crop is unnecessary
+			vx=$mx
+			vxo=0
+			buf2=$((buf2-leftcrop-rightcrop))
+			leftcrop=0
+			rightcrop=0
+		else
+			if [ "$recenterh" = "right" ]
+			then
+				recenter=1
+				# expand rightward as much as possible
+				max_expand=$((buf2))
+
+				if [ "$max_expand" -gt "$rightcrop" ]
+				then
+					max_expand=$rightcrop
+				fi
+
+				vx=$((vx + max_expand))
+				buf2=$((buf2-max_expand))
+				rightcrop=$((rightcrop-max_expand))
+			elif [ "$recenterh" = "left" ]
+			then
+				recenter=1
+				# expand leftward as much as possible
+				max_expand=$((buf2))
+
+				if [ "$max_expand" -gt "$leftcrop" ]
+				then
+					max_expand=$leftcrop
+				fi
+
+				vx=$((vx + max_expand))
+				vxo=$((vxo - max_expand))
+				buf2=$((buf2-max_expand))
+				leftcrop=$((leftcrop-max_expand))
+			else
+				# expand symetrically
+				max_expand=$((buf2/2))
+				if [ "$max_expand" -gt "$leftcrop" ]
+				then
+					max_expand=$leftcrop
+				fi
+				if [ "$max_expand" -gt "$rightcrop" ]
+				then
+					max_expand=$rightcrop
+				fi
+
+				vx=$((vx + max_expand + max_expand))
+				vxo=$((vxo - max_expand))
+				buf2=$((buf2-max_expand-max_expand))
+				leftcrop=$((leftcrop-max_expand))
+				rightcrop=$((rightcrop-max_expand))
+			fi
+
+			if [ "$recenter" = "1" ] && [ "$buf2" -gt "0" ]
+			then
+				if [ "$leftcrop" -ne "0" ]
+				then
+					if [ "$buf2" -gt "$leftcrop" ]
+					then
+						vxo=0
+						vx=$((vx+leftcrop))
+						buf2=$((buf2-leftcrop))
+						leftcrop=0
+					else
+						vxo=$((vxo - buf2))
+						vx=$((vx+buf2))
+						leftcrop=$((leftcrop - buf2))
+						buf2=0
+					fi
+				else
+					if [ "$buf2" -gt "$rightcrop" ]
+					then
+						vx=$((vx+rightcrop))
+						buf2=$((buf2-rightcrop))
+						rightcrop=0
+					else
+						vx=$((vx+buf2))
+						rightcrop=$((rightcrop - buf2))
+						buf2=0
+					fi
+				fi
+			fi
+		fi
+
+		if [ "$softcrop" = "1" ]
+		then
+			cropparam=crop=$vx:$vy:$vxo:$vyo
+			buf=$buf2
+		fi
+
+		if [ "$stretch" = "1" ]
+		then
+			buf=0
+		fi
+
+		bufx=-$buf
+		bufy=0
+	else
+		#limiting dimension is screen width
+		# expand crop area in y direction
+		echo fitting to screen width
+		x=$sx
+		y=$(echo $sx $va / p |dc | cut -f1 -d.)
+
+		# non-square pixel correction:
+		y=$(echo $sx $va / $mpa \* p |dc | cut -f1 -d.)
+
+		yscale=$(echo 5 k $y $vy / p | dc)
+		buf=$(echo $sy $y - $yscale / p| dc)
+		buf2=$buf
+		echo yscale=$yscale
+		echo ybuf=$buf
+
+		topcrop=$vyo
+		bottomcrop=$((my - vy - vyo))
+
+		if [ $buf2 -gt $((topcrop+bottomcrop)) ]
+		then
+			#show the whole damn picture, the crop is unnecessary
+			vy=$my
+			vyo=0
+			buf2=$((buf2-topcrop-bottomcrop))
+			topcrop=0
+			bottomcrop=0
+		else
+			if [ "$recenterv" = "down" ]
+			then
+				recenter=1
+				# expand downward as much as possible
+				max_expand=$((buf2))
+
+				if [ "$max_expand" -gt "$bottomcrop" ]
+				then
+					max_expand=$bottomcrop
+				fi
+
+				vy=$((vy + max_expand))
+				buf2=$((buf2-max_expand))
+				bottomcrop=$((bottomcrop-max_expand))
+			elif [ "$recenterv" = "up" ]
+			then
+				recenter=1
+				# expand upward as much as possible
+				max_expand=$((buf2))
+
+				if [ "$max_expand" -gt "$topcrop" ]
+				then
+					max_expand=$topcrop
+				fi
+
+				vy=$((vy + max_expand))
+				vyo=$((vyo - max_expand))
+				buf2=$((buf2-max_expand))
+				topcrop=$((topcrop-max_expand))
+			else
+				# expand symetrically
+				max_expand=$((buf2/2))
+				if [ "$max_expand" -gt "$bottomcrop" ]
+				then
+					max_expand=$bottomcrop
+				fi
+				if [ "$max_expand" -gt "$topcrop" ]
+				then
+					max_expand=$topcrop
+				fi
+				vy=$((vy + max_expand + max_expand))
+				vyo=$((vyo - max_expand))
+				buf2=$((buf2-max_expand-max_expand))
+				bottomcrop=$((bottomcrop-max_expand))
+				topcrop=$((topcrop-max_expand))
+			fi
+
+
+			if [ "$recenter" = "1" ] && [ "$buf2" -gt "0" ]
+			then
+				if [ "$topcrop" -ne "0" ]
+				then
+					if [ "$buf2" -gt "$topcrop" ]
+					then
+						vyo=0
+						vy=$((vy+topcrop))
+						buf2=$((buf2-topcrop))
+						topcrop=0
+					else
+						vyo=$((vyo - buf2))
+						vy=$((vy+buf2))
+						topcrop=$((topcrop - buf2))
+						buf2=0
+					fi
+				else
+					if [ "$buf2" -gt "$bottomcrop" ]
+					then
+						vy=$((vy+bottomcrop))
+						buf2=$((buf2-bottomcrop))
+						bottomcrop=0
+					else
+						vy=$((vy+buf2))
+						bottomcrop=$((bottomcrop - buf2))
+						buf2=0
+					fi
+				fi
+			fi
+		fi
+
+		if [ "$softcrop" = "1" ]
+		then
+			cropparam=crop=$vx:$vy:$vxo:$vyo
+			buf=$buf2
+		fi
+
+		if [ "$stretch" = "1" ]
+		then
+			buf=0
+		fi
+
+		bufx=0
+		bufy=-$buf
+	fi
+}
+
+###############################################################################
+# cut here. Only text below this line is used for calculating the scriptsum.
+# In other words, put all general options above this line. Code and
+# options which actually tweak crop detecion still go below this line
+# cut://0123456789abcdefghijklmnopqrstuvwxzy!@#$%^&*()-=_+
+# This is used to avoid flushing the cache on changes to the script
+# which do not affect the cache contents
+
+# If edl is set to 1 the script will use mencoder and hi res edit decsision list seeks
+# which is usefull if the timebase is all screwed up. Still buggy, and slow, since there
+# is no way to tell mencode to only encode m seconds, only m frames, and often the mplayer
+# -identify thing reports the wrong frame rate, so we ignore that.
+edl=1
+edl=0
+
+# time window starts at 200 seconds, and gets cut by win_div at each iteration
+time_window=200
+window_div=2
+
+# sample numframes_n frames at specified points partway through the
+# time window into the movie.  We hope that there is a camera angle change
+# between these samples or a moving background within them so that the full
+# frame of the video can be infered from the frame differences. This is an
+# art not a science. More samples or more frames per sample lead to more
+# accurate results, but slower detection. 3 samples is usually enough. We
+# really don't want to sample at the begining because lots of movie files
+# have intros at different aspect ratios than the real movie itself.
+# 
+# Originally the first sample of the time window was @ 16%, but some
+# music video files less than 200 seconds long have annoying overlays
+# that pop up 10 seconds into the file, and stay up for 15 seconds, so
+# from 10% - 24% of the way into the 100 second window the popups get
+# misdetected as part of the real movie. I would need to sample before 9%
+# to avoid the onset of the popup, but that screws up other files which
+# have 10 second intros.  The last sample should be around the 70 or 80%
+# mark, instead of at the end of the window, in case the movie file has
+# a trailer of a different aspect ratio, and has length approx equal to
+# the window length.
+
+# these are in percent now
+sample1=25
+sample2=33
+sample3=50
+sample4=73
+sample5=90
+
+# these are incresed for smaller movies to track the speed/accuracy tradeoff.
+# Small movies tend to also be low bitrate, so the frame differences are smaller
+# so we need a different $thresh or more frames
+numframes1=2
+numframes2=2
+numframes3=2
+numframes4=2
+numframes5=2
+
+# gamma is the gamma correction used in recoding the tga files
+# if it is too high it screws up poor vidcaps where the black level is
+# more like dark gray
+gamma=1.0
+#gamma=1.12
+
+# this is the cropdetect threshold for the final call to cropdetect
+thresh=23
+
+# this is the composite operator used on the images. Don't change it
+comp_op=difference
+
+function detect_crop()
+{
+	#Movie-Aspect is 1.33:1 - prescaling to correct movie aspect
+	cd /tmp
+	lines=$(mplayer -noconsolecontrols $dvd_dev1 $dvd_dev2 -identify -vo md5sum -ao null -v "$filename" -frames 1 2>&1)
+
+
+	if [ "$?" != "0" ]
+	then
+		mplayer -noconsolecontrols -fs $real_filename
+		exit
+	fi
+
+	
+	ma=$(echo "$lines" | grep "Movie-Aspect is" | head -1 | cut -f3 "-d " | cut -f1 -d:)
+	cd - &> /dev/null
+
+	# mplayer sometimes reports ID_VIDEO_FPS=1000.000, fix it
+	fps=$(echo "$lines" | grep "ID_VIDEO_FPS" | head -1 | cut -f2 -d=|cut -f1 -d.)
+
+	if [ -z "$fps" ] || [ "$fps" -gt 100 ]
+	then
+		echo "no way this file has $fps frames per second!"
+		fps=$assume_fps
+		fps_opt="-fps $assume_fps"
+		assuming_fps=1
+	fi
+
+	line=$(echo "$lines" | grep "VDec: vo config request -" | head -1 | cut -f2 -d-)
+	mx=$(echo $line| (read  mx crap1 my crap2; echo $mx))
+	my=$(echo $line| (read  mx crap1 my crap2; echo $my))
+
+	if [ "$mx" = "" ] || [ "$my" = "" ]
+	then
+		echo this is screwd up
+		mplayer -noconsolecontrols $real_filename
+		exit
+	fi
+
+	if [ "$ma" = "undefined" ]
+	then
+		ma=$(echo 5 k $mx $my / p | dc)
+		echo no aspect ratio output from mplayer, assuming square pixels
+	fi
+
+	#default to showing the entire damn movie picture in case letterbox detection fails
+	default_cropparam=crop=$mx:$my:0:0
+
+	if [ "$mx" -lt "1000" ]
+	then
+		numframes1=$((numframes1+2))
+		numframes2=$((numframes2+2))
+		numframes3=$((numframes3+2))
+		numframes4=$((numframes4+2))
+		numframes5=$((numframes5+2))
+	fi
+
+	if [ "$mx" -lt "200" ]
+	then
+		# for very lo-res files we assume very low bitrate
+		# and very long length, so we can't seek around with
+		# any decent resolution, so we try to space the samples
+		# further apart since the next keyframe may actually be
+		# the same for some or all of the samples!
+		#time_window=$((3*time_window))
+		edl=1
+
+		#numframes1=$((numframes1*2))
+	 	#numframes2=$((numframes2*2))
+	 	#numframes3=$((numframes3*2))
+	 	#numframes4=$((numframes4*2))
+	 	#numframes5=$((numframes5*2))
+		if [ "$assuming_fps" == "1" ]
+		then
+			assume_fps=$((assume_fps/2))
+			fps=$assume_fps
+			fps_opt="-fps $assume_fps"
+			# ok maybe this should be -ofps?
+		fi
+		echo
+	fi
+
+	rm /tmp/fsmp${suffix}/* &> /dev/null
+	#create an empty file for comparison
+	mencoder $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound "$filename" -frames 0 -o /tmp/fsmp${suffix}/fsmp.empty.out &> /dev/null
+
+	while [ "$((time_window))" -gt "9" ]
+	do
+		echo trying $time_window second time window
+
+		# Yes, genius, you could do this with mplayer instead of mencoder, except mplayer
+		# waits n seconds to see if maybe the file will get longer if you hit the end
+		# so this is twice as fast
+		mencoder $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound "$filename" -frames 2 -ss $time_window -o /tmp/fsmp${suffix}/fsmp.out &> /dev/null
+		cd /tmp/fsmp${suffix}
+
+		# don't bother with an empty file
+		if ! (diff /tmp/fsmp${suffix}/fsmp*out &> /dev/null)
+		then
+			mplayer -noconsolecontrols fsmp.out -frames 2 -vo tga &> /dev/null
+		fi
+
+		cd - &> /dev/null
+
+		if [ -e  /tmp/fsmp${suffix}/00000002.tga ]
+		then
+			# we got 2 frames out after seeking into the file, so the file is at least
+			# time_window seconds long
+			break
+		fi
+
+		time_window=$((time_window/window_div))
+	done
+
+	if [ "$mx" -lt "200" ]
+	then
+		# ok, we can't seek very well, so do things the slow way
+		#edl=1
+		echo
+	fi
+
+	rm /tmp/fsmp${suffix}/* &> /dev/null
+
+	s1=$((time_window*sample1/100))
+	s2=$((time_window*sample2/100))
+	s3=$((time_window*sample3/100))
+	s4=$((time_window*sample4/100))
+	s5=$((time_window*sample5/100))
+
+	if [ "$time_window" -lt "10" ]
+	then
+#		# if we have less than 10 seconds there may not be any keyframes, so we won't be able to seek
+#		# therefore grab more frames from the begining
+#		s1=0
+#		numframes1=30
+#
+#		# or: look, if there is less than 10 seconds of video it's likely to be from a single camera angle
+#		# and if the background is static we'll wind up cutting it off, so abort the letterbox detection
+#		s1=0
+#		s2=0
+#		s3=0
+#		s4=0
+#		s5=0
+#		numframes1=0
+#		numframes2=0
+#		numframes3=0
+#		numframes4=0
+#		numframes5=0
+
+		# actually, we should try the orthodox cropdetect in this case. Can't hurt.
+		if  [ "$dvd" != "1" ] && [ "$stream" != "1" ]
+		then
+			echo video is short, using orthodox cropdetect
+			cd /tmp/fsmp${suffix}
+			echo | mencoder "$filename" -ofps 1 -frames 10 -nosound -ovc raw -vf format=rgba,scale=$mx:$my -o t.avi &> /dev/null
+			filename=/tmp/fsmp${suffix}/t.avi
+			comp_op=plus
+			#thresh=$((2*thresh))
+			cd - &> /dev/null
+		else
+			echo video is too short, not correcting any potential letterboxing
+		fi
+	fi
+
+	ms=$((numframes1*1000/$fps))
+
+	if [ "$ms" -lt 100 ]
+	then
+		ms=0$ms
+	fi
+
+	if [ "$ms" -lt 10 ]
+	then
+		ms=0$ms
+	fi
+
+	echo 00     $s1 0  >  /tmp/fsmp${suffix}/1/edl
+	echo $s1.$ms $s2 0 >> /tmp/fsmp${suffix}/1/edl
+	echo $s2.$ms $s3 0 >> /tmp/fsmp${suffix}/1/edl
+	echo $s3.$ms $s4 0 >> /tmp/fsmp${suffix}/1/edl
+	echo $s4.$ms $s5 0 >> /tmp/fsmp${suffix}/1/edl
+	frames=$((numframes1 * 5 + 4))
+
+
+	if [ "$edl" = "1" ]
+	then
+		echo sampling $ms millisconds worth of frames at $s1 $s2 $s3 $s4 $s5 seconds
+		echo $frames frames
+		# the following is overly complicated because mplayer
+		# ignores keyframes when outputing to tga files, so
+		# everything loks weird until the next keyframe comes
+		# around. So I have to use mencoder to get the frames dumped
+		# nicely, then re-invoke mplayer to get the tga files. yes
+		# this is stupid, don't blame me.
+
+		(
+		(cd /tmp/fsmp${suffix}/1; mencoder $fps_opt $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound -vf scale=$mx:$my "$filename" -frames $frames -edl edl -hr-edl-seek -o fsmp.out; mplayer -noconsolecontrols -vo tga -vf scale=$mx:$my fsmp.out) &
+
+		wait
+		) &> /dev/null
+	else
+		echo sampling {$numframes1,$numframes2,$numframes3,$numframes4,$numframes5} frames at $s1 $s2 $s3 $s4 $s5 seconds
+
+		# the following is overly complicated because mplayer
+		# ignores keyframes when outputing to tga files, so
+		# everything loks weird until the next keyframe comes
+		# around. So I have to use mencoder to get the frames dumped
+		# nicely, then re-invoke mplayer to get the tga files. yes
+		# this is stupid, don't blame me.
+
+		# update: even this doesn't work for low bitrate asf files!!
+		# mencoder outputs nice clean frames, but samples happen at the same
+		# place even when supposedly seperated by 15 seconds
+
+		(
+		(mencoder -fps 100 $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound -vf scale=$mx:$my "$filename" -frames $numframes1 -ss $s1 -o /tmp/fsmp${suffix}/1/fsmp.out -hr-edl-seek;  cd /tmp/fsmp${suffix}/1; mplayer -noconsolecontrols -vo tga -nosound -vf scale=$mx:$my fsmp.out) &
+		(mencoder $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound -vf scale=$mx:$my "$filename" -frames $numframes2 -ss $s2 -o /tmp/fsmp${suffix}/2/fsmp.out ;  cd /tmp/fsmp${suffix}/2; mplayer -noconsolecontrols -vo tga -nosound -vf scale=$mx:$my fsmp.out) &
+		(mencoder $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound -vf scale=$mx:$my "$filename" -frames $numframes3 -ss $s3 -o /tmp/fsmp${suffix}/3/fsmp.out ;  cd /tmp/fsmp${suffix}/3; mplayer -noconsolecontrols -vo tga -nosound -vf scale=$mx:$my fsmp.out) &
+		(mencoder $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound -vf scale=$mx:$my "$filename" -frames $numframes4 -ss $s4 -o /tmp/fsmp${suffix}/4/fsmp.out ;  cd /tmp/fsmp${suffix}/4; mplayer -noconsolecontrols -vo tga -nosound -vf scale=$mx:$my fsmp.out) &
+		(mencoder $dvd_dev1 $dvd_dev2 -ovc raw -vf format=rgba -nosound -vf scale=$mx:$my "$filename" -frames $numframes5 -ss $s5 -o /tmp/fsmp${suffix}/5/fsmp.out ;  cd /tmp/fsmp${suffix}/5; mplayer -noconsolecontrols -vo tga -nosound -vf scale=$mx:$my fsmp.out) &
+
+	wait
+	) &> /dev/null
+fi
+
+	cd /tmp/fsmp${suffix}
+
+	echo diffing sample frames
+	unset last
+	fn=1
+	for a in */*tga
+	do
+		if [ "$last" != "" ]
+		then
+			# this is were the smarts come into play
+			# if you want a mo' better autocrop play around here and with the sample settings
+			(nice -n 3 convert -compose $comp_op $a $last -composite $fn.diff.tga) &
+		fi
+
+		last="$a"
+		fn=$((fn+1))
+
+		if [ $((fn%num_cpus)) = "0" ]
+		then
+			wait
+		fi
+	done
+
+	wait
+
+	#eq2[=gamma:contrast:brightness:saturation:rg:gg:bg:weight]
+
+	if [ -z "$gamma" ] || [ "$gamma" = "1" ] || [ "$gamma" = "1.0" ] || [ "$gamma" = "1.00" ]
+	then
+		eq2=""
+	else
+		eq2="eq2=$gamma,"
+	fi
+
+	if [ "$debug" = "1" ]
+	then
+		mplayer -noconsolecontrols $vidout -ao null -fs -fps 4 'mf://*/*.tga'
+		vidout="-fs -fps 4"
+	else
+		vidout="-vo null"
+	fi
+
+	echo running advanced cropdetect
+	#[CROP] Crop area: X: 1..319  Y: 46..196  (-vf crop=304:144:10:50).
+	cropparam=$(mplayer -noconsolecontrols $vidout -ao null -vf ${eq2}cropdetect=$thresh:2 'mf://*diff.tga' 2> /dev/null | grep -i "crop area:" | tail -1 | cut -f 2 -d\( | (read a b; echo $b))
+	cropparam=${cropparam/)/}
+	cropparam=${cropparam/./}
+	detected_cropparam=$cropparam
+	echo detected cropparam:$cropparam
+	$remove *tga [1-5]/*tga &> /dev/null
+	cd - &> /dev/null
+
+	echo adding file to the cache
+
+	# add the data to the caches
+	# lru must be handled unconditionally, so we have to do this at the end of the file too
+	(cat /tmp/fsmp.$scriptsum.cache  | grep -v ${filenamesum} > /tmp/fsmpcache.tmp) 2> /dev/null
+	tail -1000 /tmp/fsmpcache.tmp > /tmp/fsmp.$scriptsum.cache
+	echo ${detected_cropparam} ${skip_vr} ${mx} ${my} ${ma} ${filenamesum} >> /tmp/fsmp.$scriptsum.cache
+	rm /tmp/fsmpcache.tmp
+	chmod a+rw /tmp/fsmp.$scriptsum.cache
+
+	(cat ~/.fsmp.$scriptsum.cache  | grep -v ${filenamesum} > /tmp/fsmpcache.tmp) 2> /dev/null
+	tail -1000 /tmp/fsmpcache.tmp > ~/.fsmp.$scriptsum.cache
+	echo ${detected_cropparam} ${skip_vr} ${mx} ${my} ${ma} ${filenamesum} >> ~/.fsmp.$scriptsum.cache
+	rm /tmp/fsmpcache.tmp
+}
+
+# main MAIN execution begins here
+
+# handle dvd options, this usually does nothing for orthodox mode, but is important for
+# unorthodox mode, and if the dvd is encoded as letterbox, instead of widescreen this will
+# allow the recenter down option to work on it to show transient subtitles (tested on bullworth dvd)
+# also, it is easy to produce dvds that are letterboxed in any color you want. This script
+# will handle those too, make em nice rainbow colors if you want.
+
+if [ "$1" = "-dvd-device" ]
+then
+	dvd_dev1="-dvd-device"
+	if [ "${2:0:1}" = "/" ]
+	then
+		# absolute pathname
+		dvd_dev2="$2"
+	else
+		dvd_dev2="$PWD/$2"
+	fi
+	shift
+	shift
+fi
+
+if [ "${1:0:6}" = "dvd://" ]
+then
+	dvd=1
+	dvd_filename="$1"
+	# since they may be playing differen dvd's off of the same dvd drive, or may have
+	# multiple dvd drives we gotta be special here
+	echo "unlocking dvd and computing unique signature for dvd title (takes a while)"
+	echo "If your dvd light stops flashing and you see this message for a long time"
+	echo "you might have to eject the disc and try again"
+	dvd_filesum=$(mencoder $dvd_dev1 $dvd_dev2 "$1" -ovc copy -oac copy -o /proc/self/1 -frames 80 2>/dev/null | md5sum)
+	dvd_filesum=$(echo $dvd_filesum | cut -f1 "-d ")
+fi
+
+echo filename=\"$1\"
+
+if [ "${1:0:1}" = "/" ]
+then
+	# absolute pathname
+	filename="$1"
+else
+	# relative pathname
+	# it is possible that pathnames with ../.. in them will alias, but that doesn't make the
+	# cache search wrong, it just wastes cache space
+	filename="$PWD/$1"
+fi
+
+if [ "$dvd" = "1" ]
+then
+	filename="$dvd_filename"
+	filenamesum=$dvd_filesum
+else
+	filenamesum=$(echo $filename `ls -l "$filename"` | md5sum | cut -f1 "-d ")
+fi
+
+# if we have to rip some frames to a tmp file we use $filename for that, but for playback we use
+# $real_filename
+real_filename="$filename"
+shift
+
+cutline=$(grep -n cut:[/]*[0-9]*  `which "$0"` | head -1 | cut -f1 -d:)
+scriptsum=$(tail +$cutline  `which "$0"` | md5sum | cut -f1 "-d ")
+
+if [ ! -f /tmp/fsmp.$scriptsum.cache ]
+then
+	# copy the cache to /tmp
+	# use -u so that users can share cache results between reboots
+	cp -u ~/.fsmp.$scriptsum.cache /tmp/fsmp.$scriptsum.cache &> /dev/null
+fi
+
+# search the caches
+
+# create our working directory
+mkdir /tmp/fsmp${suffix}
+if [ ! -d /tmp/fsmp${suffix} ]
+then
+	echo "could not create temp dir!!!!!!!"
+	exit # this is too big of an error to try to continue
+fi
+
+if ! (cat /tmp/fsmp.$scriptsum.cache ~/.fsmp.$scriptsum.cache 2> /dev/null | grep $filenamesum &> /dev/null)
+then
+	# not found in either cache, add to both
+	#reset #clear the crap off the terminal screen
+
+	mkdir /tmp/fsmp${suffix}/1
+	mkdir /tmp/fsmp${suffix}/2
+	mkdir /tmp/fsmp${suffix}/3
+	mkdir /tmp/fsmp${suffix}/4
+	mkdir /tmp/fsmp${suffix}/5
+
+	detect_vr "$filename"
+	time detect_crop
+
+else
+	echo found this file in the cache! Horray!
+fi
+
+# read the values out of the cache
+line=$(cat /tmp/fsmp.$scriptsum.cache ~/.fsmp.$scriptsum.cache 2> /dev/null | grep $filenamesum |head -1)
+echo cacheline=$line
+cropparam=$(echo $line | (read a b c d e f; echo $a))
+skip_vr=$(echo $line | (read a b c d e f; echo $b))
+mx=$(echo $line | (read a b c d e f; echo $c))
+my=$(echo $line | (read a b c d e f; echo $d))
+ma=$(echo $line | (read a b c d e f; echo $e))
+echo movie x=$mx movie y=$my movie aspect=$ma
+detected_cropparam=$cropparam
+
+# don't check monitor resolution until playback is about to start, in case it changes.
+# This assumes resolutions are named like 2048x1536_73hz
+# If you have something like 1600@73hz you better change the script or
+# change the name
+res=$(xvidtune -show | (read a b; echo $a) | tr -c [0-9] " ")
+sx=$(echo ${res/x/ } | (read a b crap; echo $a))
+sy=$(echo ${res/x/ } | (read a b crap; echo $b))
+
+# I assume square pixels for screen aspect ratio. It is easier to make your
+# pixels square than to change this to support non-square pixels, just
+# consider xinerama if you don't believe me
+ra=$(echo 5 k $sx $sy / p | dc)
+echo res=$res sx=$sx sy=$sy screen resolution aspect =$ra
+
+mpa=1
+
+non_square_compat
+
+crop_adjust $cropparam
+
+# the actual call to play the movie file
+
+if [ "$orthodox" = "1" ]
+then
+	echo mplayer -noconsolecontrols $dvd_dev1 $dvd_dev2 -really-quiet -fs -vf ${cropparam} "$real_filename" $@
+	mplayer -noconsolecontrols $dvd_dev1 $dvd_dev2 -really-quiet -fs -vf ${cropparam} "$real_filename" "$@"
+else
+	echo mplayer -noconsolecontrols $dvd_dev1 $dvd_dev2 -ss $skip_vr -really-quiet -zoom -x $sx -y $sy -vf ${cropparam},expand=$bufx:$bufy -geometry 50%:50% -monitoraspect $ra "$real_filename" $@
+	mplayer -noconsolecontrols $dvd_dev1 $dvd_dev2 -ss $skip_vr -really-quiet -zoom -x $sx -y $sy -vf ${cropparam},expand=$bufx:$bufy -geometry 50%:50% -monitoraspect $ra "$real_filename" "$@"
+fi
+
+# add the data to the caches
+# lru must be handled unconditionally, so we have to do this at the end of the file too
+(cat /tmp/fsmp.$scriptsum.cache  | grep -v ${filenamesum} > /tmp/fsmpcache.tmp) 2> /dev/null
+tail -1000 /tmp/fsmpcache.tmp > /tmp/fsmp.$scriptsum.cache
+echo ${detected_cropparam} ${skip_vr} ${mx} ${my} ${ma} ${filenamesum} >> /tmp/fsmp.$scriptsum.cache
+rm /tmp/fsmpcache.tmp
+chmod a+rw /tmp/fsmp.$scriptsum.cache
+
+(cat ~/.fsmp.$scriptsum.cache  | grep -v ${filenamesum} > /tmp/fsmpcache.tmp) 2> /dev/null
+tail -1000 /tmp/fsmpcache.tmp > ~/.fsmp.$scriptsum.cache
+echo ${detected_cropparam} ${skip_vr} ${mx} ${my} ${ma} ${filenamesum} >> ~/.fsmp.$scriptsum.cache
+rm /tmp/fsmpcache.tmp
+
+# uncomment this to flush the cache
+#rm /tmp/fsmp.$scriptsum.cache ~/.fsmp.$scriptsum.cache
+cp /tmp/fsmp.$scriptsum.cache ~/.fsmp.$scriptsum.cache
+echo done
+echo ${detected_cropparam} ${skip_vr} ${mx} ${my} ${ma} ${real_filename}
+cp /tmp/fsmp.$scriptsum.cache ~/.fsmp.$scriptsum.cache
+
+# leave stuff around in predictable locations for debugging
+chmod -R  a+rw /tmp/fsmp${suffix}
+rm -rf /tmp/fsmp.last &> /dev/null
+mv /tmp/fsmp${suffix} /tmp/fsmp.last

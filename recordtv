@@ -1,0 +1,4 @@
+mencoder -tv driver=v4l2:norm=NTSC:channel=$1:chanlist=us-cable:width=640:height=480:fps=22 tv:// \
+-oac mp3lame -lameopts br=96:cbr \
+-ovc lavc -lavcopts vcodec=mpeg4:vbitrate=3000:vhq:vqmin=2:vlelim=-4:vcelim=7:lumi_mask=0.05:dark_mask=0.01 \
+-o channel_$1.avi

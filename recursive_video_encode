@@ -1,0 +1,7 @@
+IFS=$'\n'; for i in `find . -iname "*avi"`; do echo $i; sleep 1; ./encodefile.xvid ${i##*/} && mv "${i##*/}" "${i##*/}.original"; done
+
+IFS=$'\n'; for i in `find . -iname "*stat*"`; do echo $i; rm "$i" ; done
+
+IFS=$'\n'; for i in `find . -iname "*original"`; do echo $i; rm "$i" ; done
+
+IFS=$'\n'; for i in `find . -iname "*done"`; do echo $i; mv "$i" "${i%.*}.avi"; done

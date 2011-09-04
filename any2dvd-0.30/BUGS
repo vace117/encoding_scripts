@@ -1,0 +1,3 @@
+* Subtitles present in Matroska input_file(s) may not playback correctly either in Xine/Ogle or on standalone player, this used to work before the latest version of mkvtoolnix,
+	so perhaps a bug in mkvextract for subtitles
+* Total DVD Disc space usage is inaccurate for input_file(s) with multiple video streams

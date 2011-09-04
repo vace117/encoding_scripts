@@ -1,0 +1,110 @@
+any2vob-0.30	- Removed '--deinterlace' option, this should be handled by the player
+		- Removed NTSC overscan hack, this is now handled by the dvdauthoring process (<widescreen="nopanscan"/>)
+		- Fixed bug where subtitles file(s) could not be found for muxing
+		- Fixed & improved accuracy with estimated encoded filesize, now uses FFmpeg instead of MPlayer
+		- Fixed aspect ratio for 4:3 encodings
+		- Removed redundant options, '-hq' option from ffmpeg, '-vc dummy' from mplayer
+		- Added support for AVI files with multiple audio tracks
+		- Fixed muxing bug on OGM files with more than two audio tracks
+		- Added '-mc 0.1' option to preformat for WMV/ASF to improve A/V correction
+		- Replaced preformat audio encoding from mp3 to pcm, larger temp. files, but far better audio quality in the end
+		- Fixed multiple audio tracks in MOV simply replicating the first track
+
+
+any2vob-0.28	- Added '--calc' option for use on many input_files, to determine total encoded disk space usage for DVD
+		- Added a bitrate calculator to estimate encoded filesize
+		- Added '-L' option to all 'file' commands to support files which are symlinks (thanks to Angelo)
+		- Fixed characterset extraction for Matroska subtitles
+			Re-authoring a VOB that has Matroskan origins, now plays nice with spuunmux/spumux subs
+		- Added Vob subtitle ripper/re-author for re-authoring VOBs
+		- Smoothed WMV/ASF encodings by using the original's average FPS for mencoder's '-ofps'
+		- Added file type description entry for DVD Vob, skips encoding if VOB is dvdauthorable & matches desired format
+			New dependency:	* Mpgtx
+		- Fixed memory leak in mythtranscode (--fifosync)
+		- Removed SWF Flash support, still experimental, hardly used & only works for some people, some of the time
+		- Added '--workdir' option to select location of where temp files & the final VOB(s) will be placed (lots of disk space needed)
+		- Fixed bug when input_file is located in a directory that has spaces in it's name (thanks to Ed Szesnat)
+		- Ran script through an indent for easier reading
+		- Fixed ghosting on NTSC interlaced DV Avi input material (many thanks to JCA for his script, samples & testing of NTSC material)
+		- Added file type description entry for DV Avi video files
+		- Added NTSC overscan fix (thanks to Beetle B.)
+
+
+any2vob-0.26	- Fixed bug in toolkit checking causing some missing programs to go unchecked
+
+
+any2vob-0.24	- Major speed improvements in all areas
+		- Added '--preview' option to watch movie as it's being encoded
+			(uses mplayer's fbdev2 video driver for console, mplayer's sdl video driver for X11)
+		- Added URL output if a required program is found not to be installed
+		- Merged nuv2avi code into mythtv() to remove extra dependancy & conversion process
+		- All video encoding is now performed by FFmpeg, Transcode's tcextract is still used
+		- Removed avidemux2 dependancy
+		- Streamlined FFmpeg encoding to have video/audio encoded in one pass (solves occassional A/V sync problems)
+		- Many thanks to Jeff for bug reports & suggestions
+
+
+any2vob-0.22	- New dependencies:	* A52dec with multichannel WAV patch applied
+					(patch not critical, but no 5.1 encodings without it)
+					http://mightylegends.zapto.org/dvd/ebuilds/media-libs/a52dec/files/multi_wav-0.7.4.diff
+					* LibDTS
+					* Libsndfile
+					* Ecasound
+					* Wav2lpcm (optional for performing PCM audio encodings)
+		- Fixed framesize bug in quicktime() for multiple video streams
+		- Removed SoX, audio processing is now done by Ecasound, restricted low-pass LFE down from 150Hz to 100Hz
+		- Processing of MPEG input_files is now done by ffmpeg (unless telecined)
+		- Added '--audio_format' option to encode to either AC3, MP2 or PCM (AC3 is still default)
+		- Added input_file info output at start
+		- Added support for encoding from raw DV video files
+		- Added support for DTS audio tracks
+		- Added Telecine/Interlace detection & removal
+		- Added detection & encoding from files with variable framerates
+		- Minor bugfixes & clean up
+
+
+any2vob-0.20	- Improved error checking, general clean up & added terminal colours
+		- Added file type description entry for 3GP/3G2 video
+		- Added a '--mpegts_allpids' option to only encode the first main Program ID
+		- Changed '-f' to '-k' to fix AV sync issues in replex (keep PTS timestamps)
+		- MPEG-TS Transport Stream support re-written to use FFmpeg instead of Transcode (thanks to Colin Tinker)
+			(better quality, more compatible, repairs video artifacts)
+		- Added '-J modfps' back in as it produces better results when increasing framerate, '-J fps' also kept as
+			it produces better results (works) when encoding down from high framerates (eg. 59.94fps -> 25fps)
+		- Fixed handling of multiple input_files & subtitle files with spaces in their names (thanks to Anton Petrusevich)
+
+
+any2vob-0.18	- Changed mencoder to use 'vcodec=msmpeg4' as Transcode sometimes has problems auto-probing mencoded mpeg4 video
+		- Added support for encoding from a network stream URL (mms:// http:// rtsp://)
+		- Added support for encoding from an MPEG-TS Transport Stream file (DVB/HDTV capture) with multiple Programs (PIDs)
+		- Added support for encoding from .MOV files with multiple video & audio tracks
+		- Changed framerate modification commands to not use '-J modfps', but to use the newer & smoother '-J fps' instead
+		- If 16:9 aspect is used, and PRECLIP values are detected as greater than zero, then falls back to 4:3 aspect
+			so as to avoid any cropping of the picture
+		- Fixed import_check() giving false positives
+		- Removed 15ms delay on rear channels when encoding 5.1 surround sound audio track (set this in your DVD player)
+		- Fixed Xvfb for command line only usage when avidemux2 is called
+		- Added file type description entries for VP62, Theora, Nullsoft Video & Real Media
+		- Dropped maximum encoded video bitrate down from 9000kbps to 7000kbps for better compatibility with mplex
+
+
+any2vob-0.16	- Changed 'cp -g' to 'cp' as '-g' option is not supported on all distributions of Linux (thanks Eduardo)
+		- Added file type description entries for Matroska, OGM & (S)VCD
+		- Added subtitling support via an external .sub, .srt, .ssa, .smi, .rt, .txt, .aqt, .jss, .js, or .ass file (-s option)
+		- Added encoding from Matroska with multiple audio & subtitle tracks
+                - Added encoding from OGM with multiple audio & subtitle tracks
+		- Added encoding from Macromedia Flash (.swf) - experimental (uses window capture on gflashplayer)
+		- Added encoding from MythTV Nuppelvideo (.nuv) with option for automatic commercial removal
+		- Changed --export_prof in Transcode line to use --preclip=no & manually set clip via '-j' as a bug workaround 
+			to encoding files with aspect ratio 2.22:1 - http://www.itdp.de/transcode-users/2004-12/msg00541.html
+			"[filter_modfps.so] Error, video_size doesn't look to be big enough"
+		- Added logging to any2vob.log
+
+
+any2vob-0.14	- Initial public release
+
+
+** Known issues **
+* FFmpeg's AC3 encoded audio volume levels can sometimes be noticeably lower than the source file's volume level.
+	FFmpeg-devel team are currently working on this, expect to see a fix sometime soon :)
+

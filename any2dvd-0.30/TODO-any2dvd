@@ -1,0 +1,5 @@
+* Make the VMGM have multiple pages, this will eliminate the current 6 title limit
+* Write a manpage (use '-h' for now)
+* Write a GUI (QT preferred)
+* Add preview mode for menu creation
+* Have files needing mencoder pre-formatting encode straight to .m2v (--preview will be lost ??)

@@ -1,0 +1,29 @@
+#!/bin/ksh
+#
+VBITRATE=600
+OUT_FILE=$1.done
+COMMON="$1 \
+-oac copy \
+-ovc lavc -lavcopts vcodec=mpeg4:vbitrate=$VBITRATE:vhq:vqmin=2:vlelim=-4:vcelim=9:lumi_mask=0.05:dark_mask=0.01"
+
+echo "Starting 1st pass on $1..."
+PASS1="$COMMON:vpass=1 -o $OUT_FILE"
+mencoder $PASS1
+
+echo "Starting 2nd pass on $1..."
+PASS2="$COMMON:vpass=2 -o $OUT_FILE"
+mencoder $PASS2
+
+# For Re-scaling, brightness/contrast control and cropping:
+#COMMON="$1 \
+#-ss 1876 -endpos 200 \
+#-sws 2 -vop scale=744:470,crop=465:470:10:53 \
+#-oac copy \
+#-ovc lavc -lavcopts vcodec=mpeg4:vbitrate=$VBITRATE:vhq:vqmin=2:vlelim=-4:vcelim=9:lumi_mask=0.05:dark_mask=0.01"
+# Explanation
+#COMMON="$1" \
+#-ss 1112 -endpos 200 \  # Start and duration
+#-sws 2 \  # Choose the software scaler
+#-vop scale=768:576,eq=10:0,crop=745:465:16:55 \ # scale, adjust brightness:contrast, crop
+#-oac copy \
+#-ovc lavc -lavcopts vcodec=mpeg4:vbitrate=$VBITRATE:vhq

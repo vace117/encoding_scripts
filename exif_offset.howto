@@ -1,0 +1,5 @@
+IFS=$'\n'; for i in `find . -iname "*jpg"`; do echo $i ; exiv2 -Y -71 -D 9 -a 06:00:00 ad $i; done
+
+OR
+
+You can use Mapivi, which works quite well.

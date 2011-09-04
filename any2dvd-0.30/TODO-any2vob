@@ -1,0 +1,2 @@
+* Add ability to add extra external audio tracks
+* Have total_diskspace() be accurate for input_file(s) with multiple video streams

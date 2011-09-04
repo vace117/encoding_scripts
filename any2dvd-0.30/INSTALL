@@ -1,0 +1,12 @@
+## Installation instructions ##
+
+Copy the files 'any2vob' & 'any2dvd' into your $PATH somewhere.
+
+Example:
+'/usr/bin' or '/usr/local/bin'
+
+any2vob - Encodes the movies
+any2dvd - Calls on any2vob to encode the movies, then creates the DVD menus & burns to DVD
+
+After installation, type `any2dvd -h` for a help page.
+Any2vob can be used as a standalone tool seperate from any2dvd, for creation of .VOB files only, type `any2vob -h` for a help page.

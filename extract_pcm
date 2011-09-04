@@ -1,0 +1,2 @@
+mplayer $1 -vo null -vc dummy -ao pcm:file=$2
+

@@ -1,0 +1,1 @@
+mplayer -vf scale=1280:724,expand=1280:1024 filmname.avi -subfont-text-scale 3

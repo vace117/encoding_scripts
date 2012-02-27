@@ -1,0 +1,54 @@
+#!/bin/bash
+#
+VBITRATE=1000k
+ABITRATE=96k
+
+# Start position and for how long to encode from the start position.
+#SS=0
+#ENDPOS=30
+
+
+if [[ $# -lt 1 ]] ; then
+  echo
+  echo "  Usage: encodefile.ffmpeg.h264 <file>"
+  echo
+  exit 1
+fi
+
+IN_FILE=$1
+
+# Figure out what to name the output file
+OUT_FILE=${IN_FILE%\.*}.done.mp4
+
+COMMON="-y -threads 8 -i ${IN_FILE} -b ${VBITRATE} -f mp4 -vcodec libx264"
+AUDIO_ENCODE="-acodec libmp3lame -ab ${ABITRATE} -ar 48000 -ac 2"
+
+if [[ -n $SS && -n $ENDPOS ]] ; then
+  echo "Do you really want to encode from ${SS} for ${ENDPOS}? [y/n]"
+  read answer
+  if [[ $answer == "y" ]] ; then
+        COMMON="-ss ${SS} -t ${ENDPOS} $COMMON"
+  else
+  exit 1
+  fi
+fi
+
+PASS1="${COMMON} -pass 1 -vpre fastfirstpass -an ${OUT_FILE}"
+PASS2="${COMMON} -pass 2 -vpre hq ${AUDIO_ENCODE} ${OUT_FILE}"
+
+echo
+echo
+echo
+echo "Does this look ok? [y/n]"
+echo "ffmpeg ${PASS1}"
+echo "ffmpeg ${PASS2}"
+read answer
+if [[ $answer != "y" ]] ; then
+  exit 1
+fi
+
+ffmpeg $PASS1
+ffmpeg $PASS2
+
+#ffmpeg -t 30 -y -i $1 -b 2M -vcodec libx264 -pass 1 -vpre fastfirstpass -an -f mp4 output.mp4
+#ffmpeg -t 30 -y -i $1 -b 2M -vcodec libx264 -pass 2 -vpre hq -acodec libmp3lame -ab 64k -ar 48000 -ac 2 -f mp4 output.mp4

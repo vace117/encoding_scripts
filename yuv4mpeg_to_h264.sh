@@ -5,7 +5,6 @@
 #  - The 1st parameter is the target file name (mandatory)
 #  - The 2nd parameter is the WAV file for the sound track (mandatory)
 #
-# NOTE: This script does not handle sound. You will have to mux the sound in later with avidemux
 
 
 BITRATE=1800

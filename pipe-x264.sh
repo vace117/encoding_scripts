@@ -2,6 +2,15 @@
 #
 # Use this script to export Sony A57 videos from Cinelerra
 #
+
+# Change these to suite your needs
+######## Canon G6 ##############
+frame_rate=10
+resolution=640x480
+######## Sony A57 ##############
+#frame_rate=59.9401
+#resolution=1920x1080
+
 pass=1
 bit_rate=10000
 
@@ -37,9 +46,10 @@ fi
 outfile=$1
 base=`echo $outfile | sed "s/\.[^.]*$//"`
 
-command="x264 /tmp/cine_pipe --input-res 1920x1080 --fps 59.9401 --bitrate $bit_rate \
+command="x264 /tmp/cine_pipe --input-res $resolution --fps $frame_rate --bitrate $bit_rate \
     --pass $pass --stats \"$base.stats\" \
     --bframes 2 --b-adapt 2 \
+    --direct auto \
     --threads auto \
     --output \"$outfile\""
 

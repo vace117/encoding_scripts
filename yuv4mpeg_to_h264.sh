@@ -7,7 +7,7 @@
 #
 
 
-BITRATE=1800
+BITRATE=4000
 
 if [[ $# -ne 2 ]] ; then
 	echo "1st param: <target file name>, 2nd param: <WAV file>"

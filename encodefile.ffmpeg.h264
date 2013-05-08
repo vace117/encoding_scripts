@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-VBITRATE=1000k
+VBITRATE=800k
 ABITRATE=96k
 
 # Start position and for how long to encode from the start position.
@@ -33,8 +33,8 @@ if [[ -n $SS && -n $ENDPOS ]] ; then
   fi
 fi
 
-PASS1="${COMMON} -pass 1 -vpre fastfirstpass -an ${OUT_FILE}"
-PASS2="${COMMON} -pass 2 -vpre hq ${AUDIO_ENCODE} ${OUT_FILE}"
+PASS1="${COMMON} -pass 1 -vpre medium_firstpass -an ${OUT_FILE}"
+PASS2="${COMMON} -pass 2 -vpre medium ${AUDIO_ENCODE} ${OUT_FILE}"
 
 echo
 echo

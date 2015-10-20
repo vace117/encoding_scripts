@@ -8,12 +8,18 @@
 #frame_rate=10
 #resolution=640x480
 ######## Sony A57 ##############
-#frame_rate=59.9401
-#resolution=1920x1080
+frame_rate=59.9401
+resolution=1920x1080
 
 
-frame_rate=2
-resolution=960x720
+#frame_rate=2
+#resolution=960x720
+
+
+################### WARNING!!!! Automation is broken. Scroll down and modify ffmpeg command manually!
+
+
+
 
 pass=1
 bit_rate=10000
@@ -50,12 +56,18 @@ fi
 outfile=$1
 base=`echo $outfile | sed "s/\.[^.]*$//"`
 
-command="x264 /tmp/cine_pipe --input-res $resolution --fps $frame_rate --bitrate $bit_rate \
-    --pass $pass --stats \"$base.stats\" \
-    --bframes 2 --b-adapt 2 \
-    --direct auto \
-    --threads auto \
-    --output \"$outfile\""
+#command="x264 /tmp/cine_pipe --input-res $resolution --fps $frame_rate --bitrate $bit_rate \
+#    --pass $pass --stats \"$base.stats\" \
+#    --bframes 2 --b-adapt 2 \
+#    --direct auto \
+#    --threads auto \
+#    --output \"$outfile\""
+
+#command="ffmpeg -y -i /tmp/cine_pipe -b 1500k -f mp4 -vcodec libx264 -pass 1 -vpre medium_firstpass -r 25 -aspect 16:9 -s 854x480 -an  \"$outfile\""
+#command="ffmpeg -y -i /tmp/cine_pipe -b 1500k -f mp4 -vcodec libx264 -pass 2 -vpre medium -r 25 -aspect 16:9 -s 854x480 -an  \"$outfile\""
+#command="ffmpeg -y -threads 8 -i /tmp/cine_pipe -f mp4 -vcodec libx264 -preset slow -crf 17 -r 25 -aspect 16:9 -s 640x360 -an  \"$outfile\""
+command="ffmpeg -y -threads 8 -i /tmp/cine_pipe -f mp4 -vcodec libx264 -preset slow -crf 10 -r 25 -aspect 16:9 -s 1280x720 -an  \"$outfile\""
+#command="ffmpeg -y -threads 8 -i /tmp/cine_pipe -f mp4 -vf "transpose=2" -vcodec libx264 -preset slow -crf 25 -r 25 -aspect 9:16 -s 540x960 -an  \"$outfile\""
 
 # Make a named pipe
 rm /tmp/cine_pipe 2> /dev/null

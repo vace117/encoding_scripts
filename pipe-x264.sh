@@ -82,4 +82,3 @@ eval "$command &"
 
 cat > /tmp/cine_pipe
 #cat | y4mtoyuv > /tmp/cine_pipe
-

@@ -16,6 +16,7 @@ require "find"
 require "exifr"
 require "set"
 require "ftools"
+require "fileutils"
 
 raise "Usage: #{$0.split(File::SEPARATOR).last} <input_dir> <out_dir>" unless ARGV.size == 2
 
@@ -65,7 +66,7 @@ Find.find(in_dir) do |path|
 		# 
 		finalNewFileName = "#{out_dir}#{File::SEPARATOR}#{newFileName}.jpg"
 		puts "#{File.basename(path)} --> #{finalNewFileName}"
-		File.copy(path, finalNewFileName)
+		FileUtils.copy(path, finalNewFileName)
 	else
 		puts "#{path} has no EXIF data. Cannot process."
 	end
